@@ -12,9 +12,8 @@ import httpx
 from pulpline.config import Config, Subscription, default_output_dir, load_config
 from pulpline.models import ExtractionError, FetchError
 from pulpline.sinks.filesystem import FilesystemSink
-from pulpline.sources import REGISTRY, get_source
+from pulpline.sources import get_source, pick_source_for_url
 from pulpline.sources.base import Source
-from pulpline.sources.url import URLSource
 from pulpline.state import (
     ItemRecord,
     connect,
@@ -71,7 +70,7 @@ def add_once(
     target = base / "oneshots"
     key = dedup_key(url)
 
-    source_cls = _pick_source_for_url(url)
+    source_cls = pick_source_for_url(url)
 
     with connect(state_path) as conn:
         existing = is_seen(conn, key)
@@ -103,16 +102,6 @@ def add_once(
             ),
         )
         return path
-
-
-def _pick_source_for_url(url: str) -> type[Source]:
-    """Return the source class that claims `url`. URLSource is the fallback."""
-    for name, cls in REGISTRY.items():
-        if name == URLSource.name:
-            continue  # fallback - checked last
-        if cls.matches_url(url):
-            return cls
-    return URLSource
 
 
 def sync(

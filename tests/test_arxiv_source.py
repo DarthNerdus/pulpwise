@@ -45,6 +45,12 @@ def test_matches_url_claims_arxiv_hosts() -> None:
     assert not ArXivSource.matches_url("https://example.com/")
 
 
+def test_is_subscribable_only_for_api_query_urls() -> None:
+    assert ArXivSource.is_subscribable("http://export.arxiv.org/api/query?search_query=cat:cs.AI")
+    assert not ArXivSource.is_subscribable("https://arxiv.org/abs/2401.12345")
+    assert not ArXivSource.is_subscribable("https://arxiv.org/pdf/2401.12345")
+
+
 def test_paper_id_from_url() -> None:
     assert _paper_id_from_url("https://arxiv.org/abs/2401.12345") == "2401.12345"
     assert _paper_id_from_url("https://arxiv.org/abs/2401.12345v2") == "2401.12345v2"

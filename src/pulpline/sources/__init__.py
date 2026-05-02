@@ -29,6 +29,16 @@ def get_source(name: str) -> type[Source]:
     return REGISTRY[name]
 
 
+def pick_source_for_url(url: str) -> type[Source]:
+    """Return the source class that claims `url`. URLSource is the fallback."""
+    for src_name, cls in REGISTRY.items():
+        if src_name == URLSource.name:
+            continue  # fallback - checked last
+        if cls.matches_url(url):
+            return cls
+    return URLSource
+
+
 __all__ = [
     "REGISTRY",
     "ArXivSource",
@@ -38,4 +48,5 @@ __all__ = [
     "SubstackSource",
     "URLSource",
     "get_source",
+    "pick_source_for_url",
 ]

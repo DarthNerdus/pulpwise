@@ -41,6 +41,22 @@ class ArXivSource(Source):
         host = (urlsplit(url).hostname or "").lower()
         return host in {"arxiv.org", "www.arxiv.org", "export.arxiv.org"}
 
+    @classmethod
+    def is_subscribable(cls, url: str) -> bool:
+        """API query URLs subscribe; /abs/ and /pdf/ paths one-shot."""
+        return "/api/query" in urlsplit(url).path
+
+    @classmethod
+    def default_subscription_name(cls, url: str) -> str:
+        from urllib.parse import parse_qs
+
+        qs = parse_qs(urlsplit(url).query)
+        search_query = qs.get("search_query", [""])[0]
+        if search_query:
+            clean = re.sub(r"[^a-z0-9]+", "-", search_query.lower()).strip("-")
+            return f"arxiv-{clean}" if clean else "arxiv"
+        return "arxiv"
+
     def discover(self, target_url: str) -> Iterable[ItemRef]:
         self._feed_url = target_url
 

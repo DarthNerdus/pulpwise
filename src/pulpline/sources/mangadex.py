@@ -60,6 +60,11 @@ class MangaDexSource(Source):
         return host in {"mangadex.org", "www.mangadex.org", "api.mangadex.org"}
 
     @classmethod
+    def is_subscribable(cls, url: str) -> bool:
+        """Title pages subscribe; chapter pages one-shot."""
+        return bool(_PATH_TITLE.match(urlsplit(url).path))
+
+    @classmethod
     def from_config(
         cls,
         cfg: Config,

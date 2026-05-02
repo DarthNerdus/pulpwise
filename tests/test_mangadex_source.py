@@ -93,6 +93,14 @@ def test_matches_url_claims_mangadex_hosts() -> None:
     assert not MangaDexSource.matches_url("https://example.com/title/x")
 
 
+def test_is_subscribable_distinguishes_title_vs_chapter() -> None:
+    """Title pages subscribe; chapter pages one-shot."""
+    assert MangaDexSource.is_subscribable(f"https://mangadex.org/title/{MANGA_ID}/berserk")
+    assert MangaDexSource.is_subscribable(f"https://mangadex.org/title/{MANGA_ID}")
+    assert not MangaDexSource.is_subscribable(f"https://mangadex.org/chapter/{CHAPTER_ID}")
+    assert not MangaDexSource.is_subscribable("https://mangadex.org/about")
+
+
 def test_discover_title_url_yields_chapters_from_feed() -> None:
     routes = {
         f"https://api.mangadex.org/manga/{MANGA_ID}": _manga_payload(),

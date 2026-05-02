@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -81,6 +83,38 @@ class Source(ABC):
         del url
         return False
 
+    @classmethod
+    def is_subscribable(cls, url: str) -> bool:
+        """Return True if `url` is a subscription target (feed-like) for this source.
+
+        Used by the CLI's auto-detect path: when a source claims a URL via
+        `matches_url`, we ask whether the URL points at a subscribable
+        listing (e.g. arXiv API query, MangaDex title page) or a single item
+        (arXiv `/abs/<id>`, MangaDex `/chapter/<id>`).
+
+        Default: False. Most sources don't subscribe via URL pattern -
+        URLSource never does, RSSSource is auto-detected via feedparser.
+        """
+        del url
+        return False
+
+    @classmethod
+    def default_subscription_name(cls, url: str) -> str:
+        """Suggest a default subscription name from a URL.
+
+        Used when `pulp add <url>` doesn't get an explicit `--name`. Default:
+        last non-id-like path segment (good for `/title/<uuid>/berserk` and
+        `/sub/foo`-style URLs). Sources whose subscription URL puts the
+        identifying info in the query string (arXiv API queries) override.
+        """
+        parts = urlsplit(url)
+        segments = [p for p in parts.path.strip("/").split("/") if p]
+        for seg in reversed(segments):
+            if seg and not _looks_id_like(seg):
+                return _slug(seg)
+        host = parts.hostname or "feed"
+        return _slug(host.split(".")[0])
+
     @abstractmethod
     def discover(self, target_url: str) -> Iterable[ItemRef]:
         """Cheap listing of items available at `target_url`. No body downloads."""
@@ -100,3 +134,14 @@ class Source(ABC):
         from pulpline.renderers.epub import EpubRenderer
 
         return EpubRenderer().render(article)
+
+
+def _looks_id_like(segment: str) -> bool:
+    """True for UUIDs, long hex strings, or pure-digit segments."""
+    if segment.isdigit():
+        return True
+    return bool(re.match(r"^[0-9a-f-]{16,}$", segment))
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "feed"

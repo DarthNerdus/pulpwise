@@ -31,6 +31,7 @@ from pulpline.importers.substack import (
 )
 from pulpline.models import ExtractionError, FetchError
 from pulpline.sources import REGISTRY as _SOURCE_REGISTRY
+from pulpline.sources import pick_source_for_url
 from pulpline.sources.rss import RSSSource
 from pulpline.sources.url import URLSource
 from pulpline.state import connect, get_subscription_state, list_oneshots
@@ -122,13 +123,7 @@ def add(
         elif feed:
             ok = _subscribe(url, name=name, output_dir=output_dir, language=language)
         else:
-            resolved = _resolve_feed_url(url)
-            if resolved is not None:
-                if resolved != url:
-                    typer.echo(f"discovered feed: {resolved}")
-                ok = _subscribe(resolved, name=name, output_dir=output_dir, language=language)
-            else:
-                ok = _add_once(url)
+            ok = _auto_dispatch(url, name=name, output_dir=output_dir, language=language)
         successes += int(ok)
         failures += int(not ok)
 
@@ -137,6 +132,35 @@ def add(
 
     if failures:
         raise typer.Exit(code=1)
+
+
+def _auto_dispatch(
+    url: str,
+    *,
+    name: str | None,
+    output_dir: str | None,
+    language: str | None,
+) -> bool:
+    """Pick subscribe vs one-shot for a URL based on its claiming source.
+
+    For URLs claimed by a non-fallback source (arXiv API URL, MangaDex title
+    page), the source decides via `is_subscribable`. For generic URLs that
+    fall back to URLSource, we keep the existing RSS-feed autodiscovery
+    path so blog front-pages still subscribe.
+    """
+    source_cls = pick_source_for_url(url)
+    if source_cls is not URLSource:
+        if source_cls.is_subscribable(url):
+            return _subscribe(url, name=name, output_dir=output_dir, language=language)
+        return _add_once(url)
+
+    # Generic URL: feed-or-article via feedparser + RSS autodiscovery.
+    resolved = _resolve_feed_url(url)
+    if resolved is not None:
+        if resolved != url:
+            typer.echo(f"discovered feed: {resolved}")
+        return _subscribe(resolved, name=name, output_dir=output_dir, language=language)
+    return _add_once(url)
 
 
 def _resolve_feed_url(url: str) -> str | None:
@@ -229,30 +253,41 @@ def _subscribe(
     output_dir: str | None,
     language: str | None = None,
 ) -> bool:
-    """Subscribe to a feed URL. Returns True on success, False (with logged error) on failure."""
+    """Subscribe to a URL. Returns True on success, False (with logged error) on failure."""
     config = load_config()
+    source_cls = pick_source_for_url(url)
+    source_name = source_cls.name
 
-    with build_client() as client:
-        try:
-            feed_title, entry_count = _validate_feed(url, client)
-        except Exception as exc:
+    if source_cls is RSSSource or source_cls is URLSource:
+        # RSS path: feedparser-validate so we catch typos and 404s, and grab
+        # the feed's <title> for the default subscription name.
+        with build_client() as client:
+            try:
+                feed_title, entry_count = _validate_feed(url, client)
+            except Exception as exc:
+                typer.echo(
+                    f"could not parse {url} as a feed: {exc}.\n"
+                    "  if this is a single article, try `pulp add <url> --once`.",
+                    err=True,
+                )
+                return False
+        if entry_count == 0:
             typer.echo(
-                f"could not parse {url} as a feed: {exc}.\n"
+                f"feed at {url} has no entries; refusing to subscribe.\n"
                 "  if this is a single article, try `pulp add <url> --once`.",
                 err=True,
             )
             return False
+        sub_name = name or _slug_from_title(feed_title or url)
+        # The original URLSource auto-detect resolved this, so the canonical
+        # subscription source name is RSS regardless of what pick_source_for_url returned.
+        source_name = RSSSource.name
+    else:
+        # Source-specific URLs (arxiv, mangadex, etc.): we trust the URL
+        # shape and let the source class derive a sensible default name.
+        # Real validation happens on first `pulp sync`.
+        sub_name = name or source_cls.default_subscription_name(url)
 
-    if entry_count == 0:
-        typer.echo(
-            f"feed at {url} has no entries; refusing to subscribe.\n"
-            "  if this is a single article, try `pulp add <url> --once`.",
-            err=True,
-        )
-        return False
-
-    sub_name = name or _slug_from_title(feed_title or url)
-    source_name = _source_name_for_url(url)
     sub = Subscription(
         name=sub_name,
         source=source_name,
@@ -271,7 +306,7 @@ def _subscribe(
         return False
 
     save_config(new_config)
-    typer.echo(f"subscribed to {sub_name!r} ({entry_count} items in feed)")
+    typer.echo(f"subscribed to {sub_name!r} ({source_name})")
     return True
 
 
