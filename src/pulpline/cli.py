@@ -94,6 +94,12 @@ def add(
         "--output-dir",
         help="Per-subscription output directory override.",
     ),
+    language: str | None = typer.Option(
+        None,
+        "--language",
+        "-l",
+        help="Source-specific language code (MangaDex: chapter translation language, e.g. 'ru').",
+    ),
 ) -> None:
     """Add one or more URLs.
 
@@ -114,13 +120,13 @@ def add(
         if once:
             ok = _add_once(url)
         elif feed:
-            ok = _subscribe(url, name=name, output_dir=output_dir)
+            ok = _subscribe(url, name=name, output_dir=output_dir, language=language)
         else:
             resolved = _resolve_feed_url(url)
             if resolved is not None:
                 if resolved != url:
                     typer.echo(f"discovered feed: {resolved}")
-                ok = _subscribe(resolved, name=name, output_dir=output_dir)
+                ok = _subscribe(resolved, name=name, output_dir=output_dir, language=language)
             else:
                 ok = _add_once(url)
         successes += int(ok)
@@ -217,7 +223,12 @@ def _add_once(url: str) -> bool:
     return True
 
 
-def _subscribe(url: str, name: str | None, output_dir: str | None) -> bool:
+def _subscribe(
+    url: str,
+    name: str | None,
+    output_dir: str | None,
+    language: str | None = None,
+) -> bool:
     """Subscribe to a feed URL. Returns True on success, False (with logged error) on failure."""
     config = load_config()
 
@@ -242,7 +253,13 @@ def _subscribe(url: str, name: str | None, output_dir: str | None) -> bool:
 
     sub_name = name or _slug_from_title(feed_title or url)
     source_name = _source_name_for_url(url)
-    sub = Subscription(name=sub_name, source=source_name, url=url, output_dir=output_dir)
+    sub = Subscription(
+        name=sub_name,
+        source=source_name,
+        url=url,
+        output_dir=output_dir,
+        language=language,
+    )
 
     try:
         new_config = add_subscription(config, sub)

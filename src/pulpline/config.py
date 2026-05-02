@@ -41,6 +41,7 @@ class Subscription:
     source: str
     url: str
     output_dir: str | None = None  # None means inherit from paths.output_dir
+    language: str | None = None  # source-specific (e.g. MangaDex chapter language)
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,11 +214,16 @@ def _sub_from_dict(raw: dict[str, object], index: int) -> Subscription:
     if output_dir is not None and not isinstance(output_dir, str):
         raise ConfigError(f"subscriptions[{index}].output_dir must be a string")
 
+    language = raw.get("language")
+    if language is not None and not isinstance(language, str):
+        raise ConfigError(f"subscriptions[{index}].language must be a string")
+
     return Subscription(
         name=raw["name"],  # type: ignore[arg-type]
         source=raw["source"],  # type: ignore[arg-type]
         url=raw["url"],  # type: ignore[arg-type]
         output_dir=output_dir,
+        language=language,
     )
 
 
@@ -225,4 +231,6 @@ def _sub_to_dict(sub: Subscription) -> dict[str, str]:
     out: dict[str, str] = {"name": sub.name, "source": sub.source, "url": sub.url}
     if sub.output_dir is not None:
         out["output_dir"] = sub.output_dir
+    if sub.language is not None:
+        out["language"] = sub.language
     return out

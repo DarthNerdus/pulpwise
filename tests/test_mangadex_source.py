@@ -221,6 +221,46 @@ def test_render_raises_on_image_fetch_failure() -> None:
             source.render(article)
 
 
+def test_from_config_uses_subscription_language() -> None:
+    from pulpline.config import Config, Subscription
+
+    cfg = Config()
+    sub = Subscription(name="berserk", source="mangadex", url="x", language="ru")
+    source = MangaDexSource.from_config(cfg, subscription=sub)
+    assert source._language == "ru"
+
+
+def test_from_config_falls_back_to_english_when_no_language() -> None:
+    from pulpline.config import Config
+
+    cfg = Config()
+    source = MangaDexSource.from_config(cfg)
+    assert source._language == "en"
+
+
+def test_discover_passes_language_to_feed_query() -> None:
+    """Subscribing with language='ja' filters /feed by translatedLanguage[]=ja."""
+    seen_params: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url).split("?")[0]
+        # Capture the translatedLanguage[] query parameter value.
+        for k, v in request.url.params.multi_items():
+            if k == "translatedLanguage[]":
+                seen_params["lang"] = v
+        if url == f"https://api.mangadex.org/manga/{MANGA_ID}":
+            return httpx.Response(200, json=_manga_payload())
+        if url == f"https://api.mangadex.org/manga/{MANGA_ID}/feed":
+            return httpx.Response(200, json={"result": "ok", "data": []})
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with MangaDexSource(client=client, language="ja") as source:
+        list(source.discover(f"https://mangadex.org/title/{MANGA_ID}/whatever"))
+
+    assert seen_params.get("lang") == "ja"
+
+
 def test_build_cbz_directly() -> None:
     pages = [("a.png", b"AAA"), ("b.jpg", b"BBB")]
     cbz = _build_cbz(pages)

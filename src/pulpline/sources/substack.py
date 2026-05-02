@@ -47,7 +47,13 @@ class SubstackSource(Source):
                 self.client.cookies.set(name, value, domain=".substack.com")
 
     @classmethod
-    def from_config(cls, cfg: Config, client: httpx.Client | None = None) -> SubstackSource:
+    def from_config(
+        cls,
+        cfg: Config,
+        client: httpx.Client | None = None,
+        subscription: object | None = None,
+    ) -> SubstackSource:
+        del subscription
         cookies_path = cfg.auth_for("substack").get("cookies_path")
         cookies = load_cookies(Path(cookies_path)) if cookies_path else None
         return cls(client=client, cookies=cookies)

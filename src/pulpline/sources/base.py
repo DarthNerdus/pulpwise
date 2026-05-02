@@ -12,7 +12,7 @@ from pulpline.models import ItemRef, RawArticle
 from pulpline.util.http import build_client
 
 if TYPE_CHECKING:
-    from pulpline.config import Config
+    from pulpline.config import Config, Subscription
 
 
 class Source(ABC):
@@ -54,13 +54,20 @@ class Source(ABC):
         self.close()
 
     @classmethod
-    def from_config(cls, cfg: Config, client: httpx.Client | None = None) -> Source:
-        """Construct an instance from the loaded Config.
+    def from_config(
+        cls,
+        cfg: Config,
+        client: httpx.Client | None = None,
+        subscription: Subscription | None = None,
+    ) -> Source:
+        """Construct an instance from the loaded Config and (optionally) a subscription.
 
-        Default impl: ignore the config, just pass the client. Sources that
-        need cross-subscription auth (Substack cookies, etc.) override this
-        to pull from `cfg.auth.*`.
+        Default impl: ignore everything, just pass the client. Sources that need
+        cross-subscription auth (Substack cookies) read from `cfg.auth.*`.
+        Sources with per-subscription knobs (MangaDex language) read from
+        `subscription.*`. The subscription is None on one-shot paths.
         """
+        del cfg, subscription
         return cls(client=client)
 
     @classmethod

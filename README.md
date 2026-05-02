@@ -89,8 +89,29 @@ pulp add https://mangadex.org/chapter/xyz-uuid
 
 Pulpline talks to MangaDex's public API directly (no auth needed), pulls
 chapter images from MangaDex's at-home CDN, and zips them into CBZ files
-that Boox / KOReader / Calibre handle natively. Default language is English;
-the most recent 25 chapters are tracked per `pulp sync`.
+that Boox / KOReader / Calibre handle natively. Default language is English
+(`en`); the most recent 25 chapters per language are tracked per `pulp sync`.
+
+To pick a different translation language, pass `--language` (or `-l`) when
+subscribing - it accepts MangaDex's standard language codes (`ja`, `ru`,
+`es`, `fr`, `de`, `zh`, `ko`, `pt-br`, etc.):
+
+```bash
+pulp add 'https://mangadex.org/title/.../berserk' --language ja
+```
+
+Or edit `~/.config/pulpline/config.toml` directly:
+
+```toml
+[[subscriptions]]
+name = "berserk"
+source = "mangadex"
+url = "https://mangadex.org/title/.../berserk"
+language = "ja"
+```
+
+One-shot chapter URLs (`/chapter/<id>`) don't need a language hint - the
+chapter ID already names a specific translated chapter.
 
 URLs on `mangadex.org` auto-route to the MangaDex source - no flag needed.
 The output is a `.cbz` (rather than `.epub` / `.pdf`) and ends up in the

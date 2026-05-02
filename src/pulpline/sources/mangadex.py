@@ -22,13 +22,16 @@ import re
 import zipfile
 from collections.abc import Iterable
 from datetime import datetime
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import urlsplit
 
 import httpx
 
 from pulpline.models import ExtractionError, FetchError, ItemRef, RawArticle
 from pulpline.sources.base import Source
+
+if TYPE_CHECKING:
+    from pulpline.config import Config, Subscription
 
 _API_BASE = "https://api.mangadex.org"
 _DEFAULT_LANGUAGE = "en"
@@ -41,15 +44,35 @@ class MangaDexSource(Source):
     name: ClassVar[str] = "mangadex"
     extension: ClassVar[str] = "cbz"
 
-    def __init__(self, client: httpx.Client | None = None) -> None:
+    def __init__(
+        self,
+        client: httpx.Client | None = None,
+        language: str = _DEFAULT_LANGUAGE,
+    ) -> None:
         super().__init__(client=client)
         self._chapters: dict[str, dict[str, Any]] = {}
         self._feed_url: str = ""
+        self._language = language or _DEFAULT_LANGUAGE
 
     @classmethod
     def matches_url(cls, url: str) -> bool:
         host = (urlsplit(url).hostname or "").lower()
         return host in {"mangadex.org", "www.mangadex.org", "api.mangadex.org"}
+
+    @classmethod
+    def from_config(
+        cls,
+        cfg: Config,
+        client: httpx.Client | None = None,
+        subscription: Subscription | None = None,
+    ) -> MangaDexSource:
+        del cfg
+        language = (
+            subscription.language
+            if subscription is not None and subscription.language
+            else _DEFAULT_LANGUAGE
+        )
+        return cls(client=client, language=language)
 
     def discover(self, target_url: str) -> Iterable[ItemRef]:
         self._feed_url = target_url
@@ -146,7 +169,7 @@ class MangaDexSource(Source):
             response = self.client.get(
                 f"{_API_BASE}/manga/{manga_id}/feed",
                 params={
-                    "translatedLanguage[]": _DEFAULT_LANGUAGE,
+                    "translatedLanguage[]": self._language,
                     "order[chapter]": "desc",
                     "limit": str(_DISCOVER_LIMIT),
                 },
