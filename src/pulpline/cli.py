@@ -3,19 +3,28 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
+from pathlib import Path
 
 import feedparser
 import httpx
 import typer
 
 from pulpline import __version__, pipeline
+from pulpline.auth import AuthError, load_cookies
 from pulpline.config import (
+    Config,
     ConfigError,
     Subscription,
     add_subscription,
     load_config,
     remove_subscription,
     save_config,
+)
+from pulpline.importers.substack import (
+    SubstackPublication,
+    list_user_subscriptions,
+    parse_selection,
 )
 from pulpline.models import ExtractionError, FetchError
 from pulpline.state import connect, get_subscription_state
@@ -26,6 +35,9 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+
+import_app = typer.Typer(help="Bulk-import subscriptions from external services.")
+app.add_typer(import_app, name="import")
 
 
 def _version_callback(value: bool) -> None:
@@ -271,6 +283,94 @@ def _slug_from_title(text: str) -> str:
     """Lowercased alphanumeric+hyphen slug suitable as a subscription name."""
     s = _SLUG_NON_ALNUM.sub("-", text.lower()).strip("-")
     return s or "feed"
+
+
+@import_app.command("substack")
+def import_substack(
+    username: str = typer.Argument(..., help="Your Substack handle (e.g. 'egorkonovalov')."),
+    cookies: Path = typer.Option(
+        ...,
+        "--cookies",
+        help="Path to a cookies.json from your logged-in browser session.",
+    ),
+) -> None:
+    """Import all of your Substack subscriptions in one shot.
+
+    Reads your session cookies, fetches the publications you follow, presents
+    a numeric selection prompt, and writes the chosen ones into config.toml
+    as `source = "substack"` subscriptions. Future `pulp sync` runs will use
+    those cookies to access paid content.
+    """
+    try:
+        cookie_dict = load_cookies(cookies)
+    except AuthError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    with build_client() as client:
+        try:
+            pubs = list_user_subscriptions(username, cookie_dict, client)
+        except httpx.HTTPError as exc:
+            typer.echo(f"failed to fetch subscriptions for {username!r}: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+    if not pubs:
+        typer.echo(
+            f"no subscriptions found for {username!r}. is the handle correct, "
+            "and were the cookies exported from a logged-in session?",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    chosen = _prompt_select(pubs)
+    if not chosen:
+        typer.echo("nothing selected; nothing imported.")
+        return
+
+    config = load_config()
+    new_auth = dict(config.auth)
+    new_auth["substack"] = {"cookies_path": str(cookies)}
+    new_config = replace(config, auth=new_auth)
+
+    added = 0
+    skipped = 0
+    for pub in chosen:
+        sub_name = _slug_from_title(pub.name)
+        sub = Subscription(name=sub_name, source="substack", url=pub.url)
+        try:
+            new_config = add_subscription(new_config, sub)
+            added += 1
+        except ConfigError:
+            skipped += 1  # name collision with existing sub
+
+    save_config(new_config)
+    msg = f"imported {added} subscription(s)"
+    if skipped:
+        msg += f"; {skipped} skipped (name already exists)"
+    typer.echo(msg)
+
+
+def _prompt_select(pubs: list[SubstackPublication]) -> list[SubstackPublication]:
+    typer.echo(f"\nfound {len(pubs)} subscription(s):")
+    for i, pub in enumerate(pubs, start=1):
+        flag = " [paid]" if pub.paid else ""
+        typer.echo(f"  [{i:>2}] {pub.name}{flag}  -  {pub.url}")
+
+    raw = typer.prompt(
+        "\nwhich to import? (e.g. '1,3,5-7', 'all', or 'none')",
+        default="all",
+        show_default=True,
+    )
+    try:
+        indices = parse_selection(raw, len(pubs))
+    except ValueError as exc:
+        typer.echo(f"invalid selection: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    return [pubs[i - 1] for i in sorted(indices)]
+
+
+# Annotation reference so `Config` is not flagged unused after later refactors.
+_ = Config
 
 
 def main() -> None:

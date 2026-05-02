@@ -51,6 +51,37 @@ pulp remove simon-willison-s-weblog
 
 `pulp add` auto-classifies each URL: real feeds get subscribed, single articles get one-shot. Use `--once` or `--feed` to override for the whole call. Errors on one URL do not abort the rest of the batch.
 
+## Substack with paid subscriptions
+
+Substack's public `/feed` URLs only carry free posts. To bring paid posts into
+pulpline, export your logged-in session cookies and use the bulk-import
+command:
+
+```bash
+# 1. Export cookies from your browser. A "cookies.json" extension that exports
+#    the JSON-array format works (each entry has at least `name` and `value`).
+#    Save the file somewhere private, e.g. ~/.config/pulpline/substack-cookies.json
+
+# 2. Import all your subscriptions in one shot:
+pulp import substack <your-substack-handle> --cookies ~/.config/pulpline/substack-cookies.json
+```
+
+The command:
+
+1. Reads your cookies file
+2. Calls Substack's user-profile endpoint to list every publication you follow
+3. Shows them as a numbered list and prompts: `1,3,5-7` / `all` / `none`
+4. Writes selected ones to `config.toml` as `source = "substack"` subscriptions
+5. Records the cookies path under `[auth.substack]` so future syncs use it
+
+After import, `pulp sync` calls Substack's authenticated post API for each
+subscription, which returns full body HTML for paid posts you have access to.
+Cookies expire after a few weeks; when they do, re-export and update the
+`auth.substack.cookies_path` (or just re-run `pulp import substack`).
+
+Cookie files contain session credentials - treat them like passwords. They
+sit in `~/.config/pulpline/` by convention, which is `chmod 600`-able.
+
 ## Configuration
 
 `~/.config/pulpline/config.toml` is created on first run. Hand-editable:

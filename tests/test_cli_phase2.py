@@ -184,6 +184,97 @@ def test_add_processes_multiple_urls_independently(
     assert "batch:" in result.output and "2 ok" in result.output
 
 
+def test_import_substack_writes_subs_and_auth(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Full CLI flow: cookies + mocked API populate config.toml's auth + subscriptions."""
+    from pulpline import cli
+    from pulpline.importers import substack as substack_importer
+
+    cookies_path = tmp_path / "cookies.json"
+    cookies_path.write_text('[{"name":"substack.sid","value":"abc"}]', encoding="utf-8")
+
+    fake_pubs = [
+        substack_importer.SubstackPublication(
+            name="Sam Kriss", url="https://samkriss.substack.com", paid=True
+        ),
+        substack_importer.SubstackPublication(
+            name="Stratechery", url="https://stratechery.com", paid=True
+        ),
+    ]
+
+    def fake_list(
+        username: str, cookies: dict[str, str], client: httpx.Client
+    ) -> list[substack_importer.SubstackPublication]:
+        assert username == "egor"
+        assert cookies == {"substack.sid": "abc"}
+        return fake_pubs
+
+    monkeypatch.setattr(cli, "list_user_subscriptions", fake_list)
+
+    result = runner.invoke(
+        app,
+        ["import", "substack", "egor", "--cookies", str(cookies_path)],
+        input="all\n",
+    )
+    assert result.exit_code == 0, result.output
+
+    config = load_config()
+    assert config.auth_for("substack")["cookies_path"] == str(cookies_path)
+    sub_names = {s.name for s in config.subscriptions}
+    assert sub_names == {"sam-kriss", "stratechery"}
+    sub_sources = {s.source for s in config.subscriptions}
+    assert sub_sources == {"substack"}
+
+
+def test_import_substack_partial_selection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from pulpline import cli
+    from pulpline.importers import substack as substack_importer
+
+    cookies_path = tmp_path / "cookies.json"
+    cookies_path.write_text('[{"name":"substack.sid","value":"abc"}]', encoding="utf-8")
+
+    pubs = [
+        substack_importer.SubstackPublication(name="A", url="https://a.example", paid=False),
+        substack_importer.SubstackPublication(name="B", url="https://b.example", paid=True),
+        substack_importer.SubstackPublication(name="C", url="https://c.example", paid=False),
+    ]
+    monkeypatch.setattr(cli, "list_user_subscriptions", lambda *a, **kw: pubs)
+
+    result = runner.invoke(
+        app,
+        ["import", "substack", "egor", "--cookies", str(cookies_path)],
+        input="1,3\n",
+    )
+    assert result.exit_code == 0, result.output
+    sub_names = {s.name for s in load_config().subscriptions}
+    assert sub_names == {"a", "c"}
+
+
+def test_import_substack_missing_cookies_file_errors(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["import", "substack", "egor", "--cookies", str(tmp_path / "nope.json")],
+    )
+    assert result.exit_code != 0
+    assert "not found" in (result.output + (result.stderr or "")).lower()
+
+
+def test_import_substack_no_subs_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from pulpline import cli
+
+    cookies_path = tmp_path / "cookies.json"
+    cookies_path.write_text('[{"name":"x","value":"y"}]', encoding="utf-8")
+    monkeypatch.setattr(cli, "list_user_subscriptions", lambda *a, **kw: [])
+
+    result = runner.invoke(
+        app,
+        ["import", "substack", "egor", "--cookies", str(cookies_path)],
+    )
+    assert result.exit_code != 0
+    assert "no subscriptions" in (result.output + (result.stderr or "")).lower()
+
+
 def test_add_batch_continues_on_per_url_failure(
     monkeypatch: pytest.MonkeyPatch, mock_client_factory: ClientFactory
 ) -> None:
