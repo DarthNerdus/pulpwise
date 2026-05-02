@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -200,6 +201,90 @@ def _sync_with_source(
     error_summary = "; ".join(error_msgs) if error_msgs else None
     update_subscription_state(conn, sub.name, status, error_summary)
     return SyncReport(sub.name, new_items, skipped, errors, tuple(error_msgs))
+
+
+@dataclass(frozen=True, slots=True)
+class MigrationReport:
+    moved: int
+    skipped_already_correct: int
+    skipped_collision: int
+    missing_on_disk: int
+    orphaned: int  # subscription was removed; file left alone
+
+
+def migrate(
+    config: Config | None = None,
+    state_path: Path | None = None,
+    dry_run: bool = False,
+) -> MigrationReport:
+    """Move existing items into their new subscription-named subfolders.
+
+    For each item in `items`:
+      - subscription items go to `<output_dir>/<sub.name>/` (or the per-sub
+        explicit override if set)
+      - one-shot items go to `<output_dir>/oneshots/`
+
+    Skips items whose file is gone, whose target already has a same-named
+    file, or whose subscription has been removed from config. Updates
+    `items.output_path` for each successful move.
+    """
+    cfg = config or load_config()
+    moved = 0
+    skipped_already = 0
+    skipped_collision = 0
+    missing = 0
+    orphaned = 0
+
+    global_default = Path(cfg.paths.output_dir).expanduser()
+
+    with connect(state_path) as conn:
+        rows = conn.execute(
+            "SELECT id, subscription_name, output_path FROM items WHERE output_path IS NOT NULL"
+        ).fetchall()
+
+        for row in rows:
+            old_path = Path(str(row["output_path"]))
+            if not old_path.exists():
+                missing += 1
+                continue
+
+            sub_name = row["subscription_name"]
+            if sub_name is None:
+                target_dir = global_default / "oneshots"
+            else:
+                sub = cfg.find(sub_name)
+                if sub is None:
+                    orphaned += 1
+                    continue
+                target_dir = cfg.output_dir_for(sub)
+
+            new_path = target_dir / old_path.name
+            if new_path == old_path:
+                skipped_already += 1
+                continue
+            if new_path.exists():
+                skipped_collision += 1
+                continue
+
+            if not dry_run:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(old_path), str(new_path))
+                conn.execute(
+                    "UPDATE items SET output_path = ? WHERE id = ?",
+                    (str(new_path), int(row["id"])),
+                )
+            moved += 1
+
+        if not dry_run:
+            conn.commit()
+
+    return MigrationReport(
+        moved=moved,
+        skipped_already_correct=skipped_already,
+        skipped_collision=skipped_collision,
+        missing_on_disk=missing,
+        orphaned=orphaned,
+    )
 
 
 def _iso_or_none(value: object) -> str | None:

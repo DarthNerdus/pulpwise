@@ -345,6 +345,30 @@ def tui() -> None:
 
 
 @app.command()
+def migrate(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview moves without touching disk."),
+) -> None:
+    """Reorganize existing items into per-subscription subfolders.
+
+    Older pulpline versions wrote every item directly under `paths.output_dir`.
+    This command walks the items table and moves each file to its new
+    subscription-named subfolder (or `oneshots/` for one-shots). Run once
+    after upgrading; idempotent and safe to re-run.
+    """
+    report = pipeline.migrate(dry_run=dry_run)
+    label = "would move" if dry_run else "moved"
+    typer.echo(f"{label}: {report.moved} file(s)")
+    if report.skipped_already_correct:
+        typer.echo(f"  already in place: {report.skipped_already_correct}")
+    if report.skipped_collision:
+        typer.echo(f"  skipped (target already exists): {report.skipped_collision}")
+    if report.missing_on_disk:
+        typer.echo(f"  files missing on disk: {report.missing_on_disk}")
+    if report.orphaned:
+        typer.echo(f"  orphaned (subscription removed): {report.orphaned}")
+
+
+@app.command()
 def remove(
     name: str = typer.Argument(..., help="Subscription name to remove."),
 ) -> None:
