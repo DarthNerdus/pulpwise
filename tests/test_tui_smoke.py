@@ -9,17 +9,20 @@ up so refactors don't silently break the app.
 from __future__ import annotations
 
 from pulpline.tui.app import PulplineApp
-from pulpline.tui.views import VIEWS, LibraryView, StatsView
+from pulpline.tui.views import VIEWS, LibraryView, StatsView, SubscriptionsView
 
 
-def test_views_registry_includes_both_views() -> None:
+def test_views_registry_includes_all_views() -> None:
     assert LibraryView in VIEWS
+    assert SubscriptionsView in VIEWS
     assert StatsView in VIEWS
 
 
 def test_view_class_attrs() -> None:
     assert LibraryView.DISPLAY_NAME == "Library"
     assert LibraryView.ID == "library"
+    assert SubscriptionsView.DISPLAY_NAME == "Subscriptions"
+    assert SubscriptionsView.ID == "subscriptions"
     assert StatsView.DISPLAY_NAME == "Stats"
     assert StatsView.ID == "stats"
 

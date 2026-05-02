@@ -59,11 +59,14 @@ For a more interactive view of your library and ingestion stats:
 pulp tui
 ```
 
-Two tabs:
+Three tabs:
 
 - **Library**: every ingested item, filterable by title or URL. `/` focuses
   the filter, `enter` opens the highlighted file in your OS default app
   (Preview / xdg-open / Explorer).
+- **Subscriptions**: name / source / item count / last sync / status / URL,
+  with the last error surfaced for any failing feed. `d` removes the
+  highlighted subscription (config-only - already-written EPUBs stay).
 - **Stats**: total / 7-day / 30-day / 1-year counts, per-source bars,
   per-format bars (EPUB vs PDF), 30-day daily activity bars.
 
