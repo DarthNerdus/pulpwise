@@ -29,7 +29,7 @@ from pulpline.importers.substack import (
     parse_selection,
 )
 from pulpline.models import ExtractionError, FetchError
-from pulpline.state import connect, get_subscription_state
+from pulpline.state import connect, get_subscription_state, list_oneshots
 from pulpline.util.http import build_client
 
 app = typer.Typer(
@@ -285,15 +285,18 @@ def sync() -> None:
 
 
 @app.command("list")
-def list_() -> None:
-    """List configured subscriptions with their last sync status."""
+def list_(
+    limit: int = typer.Option(
+        20, "--limit", help="How many recent one-shot ingestions to show.", min=0
+    ),
+) -> None:
+    """List subscriptions and recent one-shot ingestions."""
     config = load_config()
-    if not config.subscriptions:
-        typer.echo("no subscriptions configured.")
-        return
 
-    rows = []
     with connect() as conn:
+        oneshots = list_oneshots(conn, limit=limit)
+
+        sub_rows = []
         for sub in config.subscriptions:
             state = get_subscription_state(conn, sub.name)
             if state is None or state.last_synced_at is None:
@@ -301,16 +304,31 @@ def list_() -> None:
             else:
                 last = state.last_synced_at
             status = state.last_status if state else None
-            rows.append((sub.name, sub.source, sub.url, last, status))
+            sub_rows.append((sub.name, sub.source, sub.url, last, status))
 
-    name_w = max(len("NAME"), max(len(r[0]) for r in rows))
-    src_w = max(len("SOURCE"), max(len(r[1]) for r in rows))
+    if not sub_rows and not oneshots:
+        typer.echo("nothing yet. add something with `pulp add <url>`.")
+        return
 
-    typer.echo(f"{'NAME':<{name_w}}  {'SOURCE':<{src_w}}  URL")
-    for name, source, url, last, status in rows:
-        suffix = f"  ({status})" if status else ""
-        typer.echo(f"{name:<{name_w}}  {source:<{src_w}}  {url}")
-        typer.echo(f"{'':<{name_w}}  {'':<{src_w}}  last sync: {last}{suffix}")
+    if sub_rows:
+        name_w = max(len("NAME"), max(len(r[0]) for r in sub_rows))
+        src_w = max(len("SOURCE"), max(len(r[1]) for r in sub_rows))
+        typer.echo("SUBSCRIPTIONS")
+        typer.echo(f"  {'NAME':<{name_w}}  {'SOURCE':<{src_w}}  URL")
+        for name, source, url, last, status in sub_rows:
+            suffix = f"  ({status})" if status else ""
+            typer.echo(f"  {name:<{name_w}}  {source:<{src_w}}  {url}")
+            typer.echo(f"  {'':<{name_w}}  {'':<{src_w}}  last sync: {last}{suffix}")
+
+    if oneshots:
+        if sub_rows:
+            typer.echo("")
+        suffix = f" (most recent {len(oneshots)})" if len(oneshots) >= limit else ""
+        typer.echo(f"ONE-SHOTS{suffix}")
+        for item in oneshots:
+            title = item.title or "(untitled)"
+            typer.echo(f"  {item.ingested_at[:10]}  {title}")
+            typer.echo(f"              {item.canonical_url}")
 
 
 @app.command()

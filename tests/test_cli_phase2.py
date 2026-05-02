@@ -413,7 +413,46 @@ def test_remove_unknown_name_errors() -> None:
 def test_list_empty_says_so() -> None:
     result = runner.invoke(app, ["list"])
     assert result.exit_code == 0
-    assert "no subscriptions" in result.output.lower()
+    assert "nothing yet" in result.output.lower()
+
+
+def test_list_shows_oneshots(
+    monkeypatch: pytest.MonkeyPatch, mock_client_factory: ClientFactory, sample_html: str
+) -> None:
+    """One-shot ingestions appear in `pulp list` under the ONE-SHOTS section."""
+    from pulpline import pipeline
+
+    url = "https://example.com/article"
+    client = mock_client_factory({url: sample_html})
+    pipeline.add_once(url, client=client)
+
+    result = runner.invoke(app, ["list"])
+    assert result.exit_code == 0
+    assert "ONE-SHOTS" in result.output
+    assert "The End of the Beginning" in result.output  # title from sample_html
+    assert "SUBSCRIPTIONS" not in result.output  # no subs configured
+
+
+def test_list_shows_both_sections(
+    monkeypatch: pytest.MonkeyPatch, mock_client_factory: ClientFactory, sample_html: str
+) -> None:
+    """When both a sub and a one-shot exist, both sections render."""
+    from pulpline import pipeline
+
+    feed_url = "https://example.com/feed"
+    article_url = "https://example.com/article"
+    _patch_build_client(monkeypatch, mock_client_factory, {feed_url: _feed()})
+    runner.invoke(app, ["add", feed_url, "--feed", "--name", "feedname"])
+
+    client = mock_client_factory({article_url: sample_html})
+    pipeline.add_once(article_url, client=client)
+
+    result = runner.invoke(app, ["list"])
+    assert result.exit_code == 0
+    assert "SUBSCRIPTIONS" in result.output
+    assert "feedname" in result.output
+    assert "ONE-SHOTS" in result.output
+    assert "The End of the Beginning" in result.output
 
 
 def test_list_shows_subscription(

@@ -58,6 +58,14 @@ class SubscriptionState:
     last_error: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class OneShotItem:
+    title: str | None
+    canonical_url: str
+    ingested_at: str
+    output_path: str | None
+
+
 def default_state_path() -> Path:
     """Honors `PULPLINE_STATE_PATH`; otherwise XDG default."""
     override = os.environ.get("PULPLINE_STATE_PATH")
@@ -145,6 +153,29 @@ def get_subscription_state(conn: sqlite3.Connection, name: str) -> SubscriptionS
         last_status=row["last_status"],
         last_error=row["last_error"],
     )
+
+
+def list_oneshots(conn: sqlite3.Connection, limit: int = 20) -> list[OneShotItem]:
+    """Return the most recent one-shot ingestions (subscription_name IS NULL).
+
+    Items written by `pulp sync` carry their subscription_name and don't show
+    up here - those are summarized at the subscription level in `pulp list`.
+    """
+    rows = conn.execute(
+        "SELECT title, canonical_url, ingested_at, output_path FROM items "
+        "WHERE subscription_name IS NULL "
+        "ORDER BY ingested_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [
+        OneShotItem(
+            title=row["title"],
+            canonical_url=row["canonical_url"],
+            ingested_at=row["ingested_at"],
+            output_path=row["output_path"],
+        )
+        for row in rows
+    ]
 
 
 def _now_iso() -> str:
