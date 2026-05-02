@@ -235,7 +235,7 @@ Not subscriptions; ad-hoc lookups. User invokes, picks a result, downloads once.
 ## 6. Current State
 
 - **Last Updated:** 2026-05-02
-- **Status:** Phases 0 + 1 + 2 complete. `pulp add` (subscribe + one-shot), `pulp sync`, `pulp list`, `pulp remove` all functional. `make check` green: 77 tests, 88.6% coverage, mypy strict + ruff clean. Real-world dogfood: subscribed to Simon Willison's Atom feed, synced 30 articles into valid EPUBs, second sync correctly dedup'd all 30.
+- **Status:** Phases 0 + 1 + 2 + 3 complete. `pulp add` auto-classifies feed vs article (overridable with `--once`/`--feed`); `sync`/`list`/`remove` functional. Wheel installs cleanly via `uv tool install` / `pipx install` and runs end-to-end. `make check` green: 80 tests, 88.4% coverage, mypy strict + ruff clean. Pending user actions: 1-week personal dogfooding on Palma 2, version bump 0.1.0.dev0 -> 0.1.0, PyPI publish.
 - **Working directory:** `/Users/egorkonovalov/pulpline`
 
 ### Locked decisions (recorded so they don't get re-litigated)
@@ -251,5 +251,5 @@ Not subscriptions; ad-hoc lookups. User invokes, picks a result, downloads once.
 ### Known issues / Phase 3 inheritance
 - **Trafilatura's date extraction picks the first date it finds on a page** (was: Phase 2 inheritance). RSS source now uses `entry.published_parsed` from feedparser instead, so feed items get correct dates. URLSource (one-shot path) still inherits trafilatura's guess - acceptable because one-shot dates are advisory.
 - **`<?xml version="1.0"?>` declaration in EPUB chapter content silently produces empty output** in `ebooklib`. Renderer omits the declaration; DOCTYPE is fine. Documented inline in `renderers/epub.py:_wrap_html`.
-- **`pulp add <url>` (subscribe path) doesn't validate the URL is actually a feed before any extraction work** - if the page happens to feedparser-parse without bozo errors (e.g. an HTML page with embedded RSS hints), it gets subscribed. Auto-detection logic for "is this URL a feed or a single article?" is a Phase 3 polish item per the spec; until then the user must use `--once` for non-feed URLs explicitly.
+- ~~**`pulp add <url>` (subscribe path) doesn't validate the URL is actually a feed**~~ - **resolved in Phase 3.** `pulp add` now auto-classifies via feedparser; URLs without parseable feed entries fall through to one-shot. `--once` and `--feed` flags override detection. Detection is "fetch-and-parse"; we accept the double-fetch cost (detection + actual ingestion) as simpler than threading prefetched bytes through.
 - **`pulp remove <name>` leaves orphaned items in the SQLite ledger** with `subscription_name` pointing to a deleted subscription. Dedup still works via `dedup_key`, so re-subscribing under the same name will skip previously-ingested items in the first sync. That's probably desired ("don't re-fetch what I've already read") but is a non-obvious interaction - a future `--purge` flag could explicitly clean up if needed.
