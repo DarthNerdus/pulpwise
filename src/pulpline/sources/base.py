@@ -28,6 +28,9 @@ class Source(ABC):
     """
 
     name: ClassVar[str]
+    extension: ClassVar[str] = "epub"
+    """File extension for items this source produces. Most sources emit EPUBs;
+    binary-format sources (arXiv → PDF, MangaDex → CBZ) override this."""
 
     def __init__(self, client: httpx.Client | None = None) -> None:
         self._client = client
@@ -60,6 +63,17 @@ class Source(ABC):
         """
         return cls(client=client)
 
+    @classmethod
+    def matches_url(cls, url: str) -> bool:
+        """Return True if this source class should handle `url` during one-shot.
+
+        Default: False. URLSource is the fallback when no other source claims
+        the URL, so most sources don't need to override this. ArXiv overrides
+        to claim `arxiv.org` URLs.
+        """
+        del url
+        return False
+
     @abstractmethod
     def discover(self, target_url: str) -> Iterable[ItemRef]:
         """Cheap listing of items available at `target_url`. No body downloads."""
@@ -67,3 +81,15 @@ class Source(ABC):
     @abstractmethod
     def fetch(self, ref: ItemRef) -> RawArticle:
         """Download + extract the body for a single item. Expensive."""
+
+    def render(self, article: RawArticle) -> bytes:
+        """Render the fetched article to deliverable bytes.
+
+        Default: render the article's HTML body to EPUB via ebooklib. Binary
+        sources (arXiv PDFs, future MangaDex CBZs) override this to return
+        the raw bytes directly. The result is paired with `cls.extension`
+        when the sink writes the file.
+        """
+        from pulpline.renderers.epub import EpubRenderer
+
+        return EpubRenderer().render(article)

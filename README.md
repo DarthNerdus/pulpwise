@@ -51,6 +51,36 @@ pulp remove simon-willison-s-weblog
 
 `pulp add` auto-classifies each URL: real feeds get subscribed, single articles get one-shot. Use `--once` or `--feed` to override for the whole call. Errors on one URL do not abort the rest of the batch.
 
+## arXiv papers
+
+Pulpline ships an `arxiv` source that downloads the actual PDF instead of
+extracting the abstract page. Math papers' figures and equations live in the
+PDF; running them through trafilatura would destroy that.
+
+```bash
+# Single paper one-shot - paste any arxiv.org URL
+pulp add https://arxiv.org/abs/2401.12345
+
+# Subscribe to a category feed (cs.AI papers, latest 25, sorted by submission)
+pulp add 'http://export.arxiv.org/api/query?search_query=cat:cs.AI&sortBy=submittedDate&sortOrder=descending&max_results=25'
+
+# Or by author
+pulp add 'http://export.arxiv.org/api/query?search_query=au:Hinton&max_results=20'
+
+# Or by keyword
+pulp add 'http://export.arxiv.org/api/query?search_query=all:transformers&max_results=20'
+```
+
+URLs on `arxiv.org` / `export.arxiv.org` auto-route to the arXiv source - no
+flag needed. The output is a `.pdf` (not `.epub`) and lands in the same
+configured `output_dir` as everything else, where Boox readers index it
+natively.
+
+For URL formats, see arXiv's [API user manual](https://info.arxiv.org/help/api/user-manual.html#query_details).
+The `search_query` field accepts category codes (`cat:cs.AI`), authors
+(`au:lastname`), keyword search (`all:phrase`, `ti:title`, `abs:abstract`),
+and Boolean combinations.
+
 ## Bulk import from a feed reader (OPML)
 
 Most feed readers (Reeder, NetNewsWire, Inoreader, Feedly, ...) export

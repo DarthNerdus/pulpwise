@@ -30,6 +30,9 @@ from pulpline.importers.substack import (
     list_user_subscriptions,
 )
 from pulpline.models import ExtractionError, FetchError
+from pulpline.sources import REGISTRY as _SOURCE_REGISTRY
+from pulpline.sources.rss import RSSSource
+from pulpline.sources.url import URLSource
 from pulpline.state import connect, get_subscription_state, list_oneshots
 from pulpline.util.http import build_client
 
@@ -238,7 +241,8 @@ def _subscribe(url: str, name: str | None, output_dir: str | None) -> bool:
         return False
 
     sub_name = name or _slug_from_title(feed_title or url)
-    sub = Subscription(name=sub_name, source="rss", url=url, output_dir=output_dir)
+    source_name = _source_name_for_url(url)
+    sub = Subscription(name=sub_name, source=source_name, url=url, output_dir=output_dir)
 
     try:
         new_config = add_subscription(config, sub)
@@ -345,6 +349,21 @@ def remove(
         raise typer.Exit(code=1) from exc
     save_config(new_config)
     typer.echo(f"removed subscription {name!r}")
+
+
+def _source_name_for_url(url: str) -> str:
+    """Pick a source name for a subscription URL by host.
+
+    Sources that override `matches_url` claim their domain (e.g. arXiv);
+    URLSource and RSSSource don't override since they're the generic
+    fallbacks. Anything that no source claims goes to RSS.
+    """
+    for src_name, cls in _SOURCE_REGISTRY.items():
+        if src_name in (URLSource.name, RSSSource.name):
+            continue
+        if cls.matches_url(url):
+            return src_name
+    return RSSSource.name
 
 
 def _validate_feed(url: str, client: httpx.Client) -> tuple[str | None, int]:

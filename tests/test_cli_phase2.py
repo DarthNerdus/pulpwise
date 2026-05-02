@@ -270,6 +270,33 @@ def test_add_processes_multiple_urls_independently(
     assert "batch:" in result.output and "2 ok" in result.output
 
 
+def test_source_name_for_url_picks_arxiv() -> None:
+    from pulpline.cli import _source_name_for_url
+
+    assert _source_name_for_url("http://export.arxiv.org/api/query?x=y") == "arxiv"
+    assert _source_name_for_url("https://arxiv.org/abs/2401.12345") == "arxiv"
+    # Generic feed URLs default to rss
+    assert _source_name_for_url("https://example.com/feed") == "rss"
+
+
+def test_add_arxiv_query_url_subscribes_with_arxiv_source(
+    monkeypatch: pytest.MonkeyPatch, mock_client_factory: ClientFactory
+) -> None:
+    """arXiv API query URL → subscription with source=arxiv, not rss."""
+    api = "http://export.arxiv.org/api/query?search_query=cat:cs.AI"
+    atom = (Path(__file__).parent / "fixtures" / "sample_arxiv.xml").read_text()
+    _patch_build_client(monkeypatch, mock_client_factory, {api: atom})
+
+    result = runner.invoke(app, ["add", api, "--name", "arxiv-cs-ai"])
+    assert result.exit_code == 0, result.output
+
+    config = load_config()
+    assert len(config.subscriptions) == 1
+    sub = config.subscriptions[0]
+    assert sub.source == "arxiv"
+    assert sub.url == api
+
+
 def test_import_opml_writes_subscriptions(tmp_path: Path) -> None:
     """Full OPML import flow end-to-end through the CLI."""
     opml = tmp_path / "feeds.opml"

@@ -9,10 +9,9 @@ from pathlib import Path
 import httpx
 
 from pulpline.config import Config, Subscription, default_output_dir, load_config
-from pulpline.models import ExtractionError, FetchError, RawArticle
-from pulpline.renderers.epub import EpubRenderer
+from pulpline.models import ExtractionError, FetchError
 from pulpline.sinks.filesystem import FilesystemSink
-from pulpline.sources import get_source
+from pulpline.sources import REGISTRY, get_source
 from pulpline.sources.base import Source
 from pulpline.sources.url import URLSource
 from pulpline.state import (
@@ -57,28 +56,36 @@ def add_once(
     client: httpx.Client | None = None,
     state_path: Path | None = None,
 ) -> Path:
-    """Fetch a single URL, render EPUB, write to disk. Dedup-aware.
+    """Fetch a single URL, render to its source's format, write to disk. Dedup-aware.
 
-    If `url` (after normalization) has already been ingested, returns the
-    existing path without re-fetching. Re-runs are idempotent.
+    The source is picked by URL pattern (`Source.matches_url`); URLSource is
+    the fallback. So `arxiv.org/abs/...` routes to ArXivSource (PDF),
+    everything else routes to URLSource (EPUB via trafilatura).
+
+    If `url` has already been ingested, returns the existing path without
+    re-fetching. Re-runs are idempotent.
     """
     target = (output_dir or default_output_dir()).expanduser()
     key = dedup_key(url)
+
+    source_cls = _pick_source_for_url(url)
 
     with connect(state_path) as conn:
         existing = is_seen(conn, key)
         if existing is not None:
             return Path(existing)
 
-        with URLSource(client=client) as source:
+        with source_cls(client=client) as source:
             refs = list(source.discover(url))
             if len(refs) != 1:
                 raise RuntimeError(
-                    f"URLSource.discover yielded {len(refs)} items, expected exactly 1"
+                    f"{source_cls.__name__}.discover yielded {len(refs)} items, expected exactly 1"
                 )
             article = source.fetch(refs[0])
+            content = source.render(article)
 
-        path = _render_and_write(article, target)
+        sink = FilesystemSink(target)
+        path = sink.write(article, content, source_cls.extension)
 
         record_item(
             conn,
@@ -93,6 +100,16 @@ def add_once(
             ),
         )
         return path
+
+
+def _pick_source_for_url(url: str) -> type[Source]:
+    """Return the source class that claims `url`. URLSource is the fallback."""
+    for name, cls in REGISTRY.items():
+        if name == URLSource.name:
+            continue  # fallback - checked last
+        if cls.matches_url(url):
+            return cls
+    return URLSource
 
 
 def sync(
@@ -142,7 +159,6 @@ def _sync_with_source(
     refs = list(source.discover(sub.url))
 
     output_dir = cfg.output_dir_for(sub)
-    renderer = EpubRenderer()
     sink = FilesystemSink(output_dir)
 
     new_items = 0
@@ -158,8 +174,8 @@ def _sync_with_source(
         try:
             article = source.fetch(ref)
             article = replace(article, subscription_name=sub.name)
-            content = renderer.render(article)
-            path = sink.write(article, content, renderer.extension)
+            content = source.render(article)
+            path = sink.write(article, content, type(source).extension)
             record_item(
                 conn,
                 ItemRecord(
@@ -181,12 +197,6 @@ def _sync_with_source(
     error_summary = "; ".join(error_msgs) if error_msgs else None
     update_subscription_state(conn, sub.name, status, error_summary)
     return SyncReport(sub.name, new_items, skipped, errors, tuple(error_msgs))
-
-
-def _render_and_write(article: RawArticle, output_dir: Path) -> Path:
-    renderer = EpubRenderer()
-    content = renderer.render(article)
-    return FilesystemSink(output_dir).write(article, content, renderer.extension)
 
 
 def _iso_or_none(value: object) -> str | None:

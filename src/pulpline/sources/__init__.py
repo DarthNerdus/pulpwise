@@ -5,6 +5,7 @@ Promote to entry-points (`pulpline.sources` group) when a third-party plugin shi
 
 from __future__ import annotations
 
+from pulpline.sources.arxiv import ArXivSource
 from pulpline.sources.base import Source
 from pulpline.sources.rss import RSSSource
 from pulpline.sources.substack import SubstackSource
@@ -14,6 +15,7 @@ REGISTRY: dict[str, type[Source]] = {
     URLSource.name: URLSource,
     RSSSource.name: RSSSource,
     SubstackSource.name: SubstackSource,
+    ArXivSource.name: ArXivSource,
 }
 
 
@@ -25,4 +27,12 @@ def get_source(name: str) -> type[Source]:
     return REGISTRY[name]
 
 
-__all__ = ["REGISTRY", "RSSSource", "Source", "SubstackSource", "URLSource", "get_source"]
+__all__ = [
+    "REGISTRY",
+    "ArXivSource",
+    "RSSSource",
+    "Source",
+    "SubstackSource",
+    "URLSource",
+    "get_source",
+]
