@@ -1,20 +1,183 @@
-"""Configuration helpers. Phase 1: just the default output directory.
+"""TOML configuration: subscriptions list + paths.
 
-Full TOML config + auto-creation lands in Phase 2 alongside `state.py`.
+TOML is the source of truth for *what to subscribe to*. Auto-created on first
+load with a commented example so the user has something to copy. Saving uses
+an atomic tmp-then-rename to avoid leaving a half-written config behind on
+crash. SQLite (state.py) handles *what has happened*; do not mirror it here.
 """
 
 from __future__ import annotations
 
 import os
+import tempfile
+import tomllib
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+
+import tomli_w
+
+DEFAULT_OUTPUT_DIR = "~/Sync/Pulpline"
+
+_DEFAULT_CONFIG_TEMPLATE = """# pulpline config. Edit by hand, or via `pulp add` / `pulp remove`.
+
+[paths]
+output_dir = "~/Sync/Pulpline"
+
+# Example subscription (uncomment and edit):
+# [[subscriptions]]
+# name = "stratechery"
+# source = "rss"
+# url = "https://stratechery.com/feed"
+"""
+
+
+class ConfigError(Exception):
+    """Raised when the config file is malformed or violates an invariant."""
+
+
+@dataclass(frozen=True, slots=True)
+class Subscription:
+    name: str
+    source: str
+    url: str
+    output_dir: str | None = None  # None means inherit from paths.output_dir
+
+
+@dataclass(frozen=True, slots=True)
+class Paths:
+    output_dir: str = DEFAULT_OUTPUT_DIR
+
+
+@dataclass(frozen=True, slots=True)
+class Config:
+    paths: Paths = field(default_factory=Paths)
+    subscriptions: tuple[Subscription, ...] = ()
+
+    def find(self, name: str) -> Subscription | None:
+        for sub in self.subscriptions:
+            if sub.name == name:
+                return sub
+        return None
+
+    def output_dir_for(self, sub: Subscription) -> Path:
+        return Path(sub.output_dir or self.paths.output_dir).expanduser()
+
+
+def default_config_path() -> Path:
+    """Where pulpline reads/writes its TOML config.
+
+    Honors `PULPLINE_CONFIG_PATH` for tests / CI. Otherwise: XDG default.
+    """
+    override = os.environ.get("PULPLINE_CONFIG_PATH")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".config" / "pulpline" / "config.toml"
 
 
 def default_output_dir() -> Path:
-    """Where pulpline writes EPUBs by default.
-
-    Honors `PULPLINE_OUTPUT_DIR` for testing / CI. Otherwise: ~/Sync/Pulpline.
-    """
+    """Compatibility shim used by `add_once` when no config has been loaded."""
     override = os.environ.get("PULPLINE_OUTPUT_DIR")
     if override:
         return Path(override).expanduser()
-    return Path.home() / "Sync" / "Pulpline"
+    return Path(DEFAULT_OUTPUT_DIR).expanduser()
+
+
+def load_config(path: Path | None = None) -> Config:
+    """Load config from disk, creating it with defaults if absent."""
+    target = path or default_config_path()
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_DEFAULT_CONFIG_TEMPLATE, encoding="utf-8")
+        return Config()
+
+    raw = tomllib.loads(target.read_text(encoding="utf-8"))
+    return _from_raw(raw)
+
+
+def save_config(config: Config, path: Path | None = None) -> None:
+    """Atomically write `config` to TOML."""
+    target = path or default_config_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    raw: dict[str, object] = {
+        "paths": {"output_dir": config.paths.output_dir},
+    }
+    if config.subscriptions:
+        raw["subscriptions"] = [_sub_to_dict(s) for s in config.subscriptions]
+
+    fd, tmp_name = tempfile.mkstemp(prefix=".config.", suffix=".toml.tmp", dir=str(target.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            tomli_w.dump(raw, fh)
+        tmp_path.replace(target)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def add_subscription(config: Config, sub: Subscription) -> Config:
+    """Return a new Config with `sub` appended. Raises if name collides."""
+    if config.find(sub.name) is not None:
+        raise ConfigError(f"subscription named {sub.name!r} already exists")
+    return replace(config, subscriptions=(*config.subscriptions, sub))
+
+
+def remove_subscription(config: Config, name: str) -> Config:
+    """Return a new Config with the named subscription removed."""
+    if config.find(name) is None:
+        raise ConfigError(f"no subscription named {name!r}")
+    remaining = tuple(s for s in config.subscriptions if s.name != name)
+    return replace(config, subscriptions=remaining)
+
+
+def _from_raw(raw: dict[str, object]) -> Config:
+    paths_raw = raw.get("paths") or {}
+    if not isinstance(paths_raw, dict):
+        raise ConfigError("`paths` must be a table")
+    output_dir = paths_raw.get("output_dir", DEFAULT_OUTPUT_DIR)
+    if not isinstance(output_dir, str):
+        raise ConfigError("`paths.output_dir` must be a string")
+
+    subs_raw = raw.get("subscriptions") or []
+    if not isinstance(subs_raw, list):
+        raise ConfigError("`subscriptions` must be an array of tables")
+
+    subs: list[Subscription] = []
+    seen_names: set[str] = set()
+    for i, sub_raw in enumerate(subs_raw):
+        if not isinstance(sub_raw, dict):
+            raise ConfigError(f"subscriptions[{i}] must be a table")
+        sub = _sub_from_dict(sub_raw, i)
+        if sub.name in seen_names:
+            raise ConfigError(f"duplicate subscription name {sub.name!r}")
+        seen_names.add(sub.name)
+        subs.append(sub)
+
+    return Config(paths=Paths(output_dir=output_dir), subscriptions=tuple(subs))
+
+
+def _sub_from_dict(raw: dict[str, object], index: int) -> Subscription:
+    for required in ("name", "source", "url"):
+        if required not in raw:
+            raise ConfigError(f"subscriptions[{index}] missing required field {required!r}")
+        if not isinstance(raw[required], str) or not raw[required]:
+            raise ConfigError(f"subscriptions[{index}].{required} must be a non-empty string")
+
+    output_dir = raw.get("output_dir")
+    if output_dir is not None and not isinstance(output_dir, str):
+        raise ConfigError(f"subscriptions[{index}].output_dir must be a string")
+
+    return Subscription(
+        name=raw["name"],  # type: ignore[arg-type]
+        source=raw["source"],  # type: ignore[arg-type]
+        url=raw["url"],  # type: ignore[arg-type]
+        output_dir=output_dir,
+    )
+
+
+def _sub_to_dict(sub: Subscription) -> dict[str, str]:
+    out: dict[str, str] = {"name": sub.name, "source": sub.source, "url": sub.url}
+    if sub.output_dir is not None:
+        out["output_dir"] = sub.output_dir
+    return out

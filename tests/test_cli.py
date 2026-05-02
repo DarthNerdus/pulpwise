@@ -32,18 +32,6 @@ def test_add_help_lists_once_flag() -> None:
     assert "--once" in result.output
 
 
-def test_add_without_once_is_phase_2_stub() -> None:
-    result = runner.invoke(app, ["add", "https://example.com"])
-    assert result.exit_code != 0
-    assert "subscriptions" in (result.output + (result.stderr or "")).lower()
-
-
-def test_unimplemented_phase2_commands_exit_nonzero() -> None:
-    for argv in (["sync"], ["list"], ["remove", "foo"]):
-        result = runner.invoke(app, argv)
-        assert result.exit_code != 0, f"{argv} should not have succeeded yet"
-
-
 def test_add_once_invokes_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 

@@ -11,6 +11,25 @@ import pytest
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+@pytest.fixture(autouse=True)
+def _isolated_pulpline_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Per-test isolation for pulpline's persistent state.
+
+    Isolates: the state DB (via PULPLINE_STATE_PATH), the user's config file
+    (via PULPLINE_CONFIG_PATH), and the one-shot default output dir (via
+    PULPLINE_OUTPUT_DIR).
+
+    Does NOT isolate sync output. `pulp sync` writes to `paths.output_dir`
+    from the loaded TOML config, which is independent of the env var.
+    Tests that exercise sync must pass an explicit `output_dir` on the
+    Subscription or set `Config.paths.output_dir` themselves; otherwise EPUBs
+    will land in the user's actual `~/Sync/Pulpline/`.
+    """
+    monkeypatch.setenv("PULPLINE_STATE_PATH", str(tmp_path / "state.db"))
+    monkeypatch.setenv("PULPLINE_CONFIG_PATH", str(tmp_path / "config.toml"))
+    monkeypatch.setenv("PULPLINE_OUTPUT_DIR", str(tmp_path / "out"))
+
+
 @pytest.fixture
 def sample_html() -> str:
     return (FIXTURES / "sample_article.html").read_text(encoding="utf-8")

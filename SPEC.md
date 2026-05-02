@@ -235,7 +235,7 @@ Not subscriptions; ad-hoc lookups. User invokes, picks a result, downloads once.
 ## 6. Current State
 
 - **Last Updated:** 2026-05-02
-- **Status:** Phase 0 + Phase 1 complete. `pulp add <url> --once` ships URL -> EPUB end-to-end. `make check` green: 36 tests, 91% coverage, mypy strict + ruff clean.
+- **Status:** Phases 0 + 1 + 2 complete. `pulp add` (subscribe + one-shot), `pulp sync`, `pulp list`, `pulp remove` all functional. `make check` green: 77 tests, 88.6% coverage, mypy strict + ruff clean. Real-world dogfood: subscribed to Simon Willison's Atom feed, synced 30 articles into valid EPUBs, second sync correctly dedup'd all 30.
 - **Working directory:** `/Users/egorkonovalov/pulpline`
 
 ### Locked decisions (recorded so they don't get re-litigated)
@@ -248,7 +248,8 @@ Not subscriptions; ad-hoc lookups. User invokes, picks a result, downloads once.
 - Phase 1 deliverable: `pulp add <url> --once` only (no SQLite, no TOML); persistence in Phase 2
 - Substack import (post-MVP): append + interactive checklist for selection
 
-### Known issues / Phase 2 inheritance
-- **Trafilatura's date extraction picks the first date it finds on a page**, which on a multi-post blog can be a sidebar archive link rather than the article body (observed: Dan Luu's "Normalization of deviance" extracted as `2003-01-01`, when the article is from later). When RSS lands in Phase 2, the feed-supplied `<pubDate>` / Atom `<published>` should win over trafilatura's guess for items discovered via RSS.
-- **`<?xml version="1.0"?>` declaration in EPUB chapter content silently produces empty output** in `ebooklib` (parser failure caught and swallowed). The renderer omits the declaration; DOCTYPE is fine. Documented inline in `renderers/epub.py:_wrap_html`.
-- **HTML5-minimal pages without a `<head>` block** (e.g. danluu.com) defeat trafilatura's metadata extractor. URLSource now does a second-pass lxml fallback for `<title>`, `<meta name="author">`, and `<html lang>`. Phase 2 RSS source should reuse `_parse_fallbacks` for items where the feed gives only a link, not a body.
+### Known issues / Phase 3 inheritance
+- **Trafilatura's date extraction picks the first date it finds on a page** (was: Phase 2 inheritance). RSS source now uses `entry.published_parsed` from feedparser instead, so feed items get correct dates. URLSource (one-shot path) still inherits trafilatura's guess - acceptable because one-shot dates are advisory.
+- **`<?xml version="1.0"?>` declaration in EPUB chapter content silently produces empty output** in `ebooklib`. Renderer omits the declaration; DOCTYPE is fine. Documented inline in `renderers/epub.py:_wrap_html`.
+- **`pulp add <url>` (subscribe path) doesn't validate the URL is actually a feed before any extraction work** - if the page happens to feedparser-parse without bozo errors (e.g. an HTML page with embedded RSS hints), it gets subscribed. Auto-detection logic for "is this URL a feed or a single article?" is a Phase 3 polish item per the spec; until then the user must use `--once` for non-feed URLs explicitly.
+- **`pulp remove <name>` leaves orphaned items in the SQLite ledger** with `subscription_name` pointing to a deleted subscription. Dedup still works via `dedup_key`, so re-subscribing under the same name will skip previously-ingested items in the first sync. That's probably desired ("don't re-fetch what I've already read") but is a non-obvious interaction - a future `--purge` flag could explicitly clean up if needed.

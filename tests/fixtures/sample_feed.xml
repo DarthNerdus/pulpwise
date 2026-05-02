@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Stratechery by Ben Thompson</title>
+    <link>https://stratechery.com/</link>
+    <description>Test feed</description>
+    <language>en-us</language>
+    <item>
+      <title>Full Content Article</title>
+      <link>https://example.com/full</link>
+      <guid isPermaLink="false">tag:example.com,2026:full</guid>
+      <pubDate>Mon, 28 Apr 2026 12:00:00 GMT</pubDate>
+      <author>ben@example.com (Ben Thompson)</author>
+      <description>Short summary.</description>
+      <content:encoded><![CDATA[<p>This is the first paragraph of an article that ships its full body in the feed itself, in the manner of Substack and similar platforms. The body is long enough that the body-from-entry threshold accepts it as substantive content rather than a teaser, exercising the "feed has full content, no need to fetch the article URL" path of the RSS source.</p><p>A second paragraph for additional length, comfortably exceeding the minimum body length threshold to avoid any ambiguity about whether feed-supplied content should be preferred over a fresh trafilatura fetch against the article URL.</p><p>And a third paragraph because real articles have multiple paragraphs of substantive prose, and the test fixture should reflect that shape so behavior in tests matches behavior on real-world Substack-style feeds.</p>]]></content:encoded>
+    </item>
+    <item>
+      <title>Summary Only Article</title>
+      <link>https://example.com/teaser</link>
+      <guid>https://example.com/teaser</guid>
+      <pubDate>Tue, 29 Apr 2026 12:00:00 GMT</pubDate>
+      <description>A short teaser, no full content.</description>
+    </item>
+  </channel>
+</rss>
