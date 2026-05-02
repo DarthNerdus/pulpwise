@@ -50,8 +50,21 @@ class Paths:
 
 @dataclass(frozen=True, slots=True)
 class Config:
+    """Loaded TOML config.
+
+    `auth` is intentionally generic: a `{source_name: {key: value}}` mapping
+    that source plugins read whatever shape they need from. The core never
+    names a specific source - SubstackSource owns what `auth["substack"]`
+    means; the next plugin will own its own subtable.
+    """
+
     paths: Paths = field(default_factory=Paths)
+    auth: dict[str, dict[str, str]] = field(default_factory=dict)
     subscriptions: tuple[Subscription, ...] = ()
+
+    def auth_for(self, source: str) -> dict[str, str]:
+        """Return the auth subtable for a source, empty if unset."""
+        return self.auth.get(source, {})
 
     def find(self, name: str) -> Subscription | None:
         for sub in self.subscriptions:
@@ -102,6 +115,8 @@ def save_config(config: Config, path: Path | None = None) -> None:
     raw: dict[str, object] = {
         "paths": {"output_dir": config.paths.output_dir},
     }
+    if config.auth:
+        raw["auth"] = {k: dict(v) for k, v in config.auth.items()}
     if config.subscriptions:
         raw["subscriptions"] = [_sub_to_dict(s) for s in config.subscriptions]
 
@@ -139,7 +154,12 @@ def _from_raw(raw: dict[str, object]) -> Config:
     if not isinstance(output_dir, str):
         raise ConfigError("`paths.output_dir` must be a string")
 
+    auth = _auth_from_raw(raw.get("auth") or {})
+
     subs_raw = raw.get("subscriptions") or []
+    if not isinstance(subs_raw, list):
+        raise ConfigError("`subscriptions` must be an array of tables")
+
     if not isinstance(subs_raw, list):
         raise ConfigError("`subscriptions` must be an array of tables")
 
@@ -154,7 +174,24 @@ def _from_raw(raw: dict[str, object]) -> Config:
         seen_names.add(sub.name)
         subs.append(sub)
 
-    return Config(paths=Paths(output_dir=output_dir), subscriptions=tuple(subs))
+    return Config(paths=Paths(output_dir=output_dir), auth=auth, subscriptions=tuple(subs))
+
+
+def _auth_from_raw(raw: object) -> dict[str, dict[str, str]]:
+    """Validate `[auth]` is `{source: {key: str}}`. Core code stays source-agnostic."""
+    if not isinstance(raw, dict):
+        raise ConfigError("`auth` must be a table")
+    out: dict[str, dict[str, str]] = {}
+    for source_name, sub in raw.items():
+        if not isinstance(sub, dict):
+            raise ConfigError(f"`auth.{source_name}` must be a table")
+        validated: dict[str, str] = {}
+        for k, v in sub.items():
+            if not isinstance(v, str):
+                raise ConfigError(f"`auth.{source_name}.{k}` must be a string")
+            validated[k] = v
+        out[source_name] = validated
+    return out
 
 
 def _sub_from_dict(raw: dict[str, object], index: int) -> Subscription:

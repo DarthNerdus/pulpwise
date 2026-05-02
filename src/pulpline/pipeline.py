@@ -126,7 +126,7 @@ def _sync_subscription(
         return SyncReport(sub.name, 0, 0, 1, (str(exc),))
 
     try:
-        with source_cls(client=client) as source:
+        with source_cls.from_config(cfg, client=client) as source:
             return _sync_with_source(sub, cfg, conn, source)
     except (FetchError, ExtractionError) as exc:
         update_subscription_state(conn, sub.name, "error", str(exc))

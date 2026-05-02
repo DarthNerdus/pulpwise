@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import httpx
 
 from pulpline.models import ItemRef, RawArticle
 from pulpline.util.http import build_client
+
+if TYPE_CHECKING:
+    from pulpline.config import Config
 
 
 class Source(ABC):
@@ -46,6 +49,16 @@ class Source(ABC):
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+    @classmethod
+    def from_config(cls, cfg: Config, client: httpx.Client | None = None) -> Source:
+        """Construct an instance from the loaded Config.
+
+        Default impl: ignore the config, just pass the client. Sources that
+        need cross-subscription auth (Substack cookies, etc.) override this
+        to pull from `cfg.auth.*`.
+        """
+        return cls(client=client)
 
     @abstractmethod
     def discover(self, target_url: str) -> Iterable[ItemRef]:
