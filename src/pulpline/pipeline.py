@@ -188,7 +188,13 @@ def _sync_with_source(
 
     status = "ok" if errors == 0 else "error"
     error_summary = "; ".join(error_msgs) if error_msgs else None
-    update_subscription_state(conn, sub.name, status, error_summary)
+    update_subscription_state(
+        conn,
+        sub.name,
+        status,
+        error_summary,
+        total_items=source.last_known_total,
+    )
     return SyncReport(sub.name, new_items, skipped, errors, tuple(error_msgs))
 
 

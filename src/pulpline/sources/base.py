@@ -37,6 +37,14 @@ class Source(ABC):
     def __init__(self, client: httpx.Client | None = None) -> None:
         self._client = client
         self._owns_client = client is None
+        self.last_known_total: int | None = None
+        """Optional source-reported total population for the current target.
+
+        Set during `discover()` if the source has a meaningful total (e.g.
+        MangaDex's `/feed` returns `total` indicating chapter count). The
+        pipeline reads this after discover and persists it via
+        `update_subscription_state(total_items=...)`.
+        """
 
     @property
     def client(self) -> httpx.Client:

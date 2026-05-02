@@ -35,7 +35,9 @@ if TYPE_CHECKING:
 
 _API_BASE = "https://api.mangadex.org"
 _DEFAULT_LANGUAGE = "en"
-_DISCOVER_LIMIT = 25
+_DEFAULT_MAX_CHAPTERS = 25
+_DEFAULT_ORDER = "desc"
+_PAGE_SIZE = 100  # MangaDex's max per /feed page
 _PATH_TITLE = re.compile(r"^/title/([0-9a-f-]+)")
 _PATH_CHAPTER = re.compile(r"^/chapter/([0-9a-f-]+)")
 
@@ -48,11 +50,16 @@ class MangaDexSource(Source):
         self,
         client: httpx.Client | None = None,
         language: str = _DEFAULT_LANGUAGE,
+        max_chapters: int = _DEFAULT_MAX_CHAPTERS,
+        order: str = _DEFAULT_ORDER,
     ) -> None:
         super().__init__(client=client)
         self._chapters: dict[str, dict[str, Any]] = {}
         self._feed_url: str = ""
         self._language = language or _DEFAULT_LANGUAGE
+        # max_chapters: positive = take latest N; 0 = unlimited (paginate to exhaustion).
+        self._max_chapters = max_chapters if max_chapters >= 0 else _DEFAULT_MAX_CHAPTERS
+        self._order = order if order in {"asc", "desc"} else _DEFAULT_ORDER
 
     @classmethod
     def matches_url(cls, url: str) -> bool:
@@ -72,12 +79,17 @@ class MangaDexSource(Source):
         subscription: Subscription | None = None,
     ) -> MangaDexSource:
         del cfg
-        language = (
-            subscription.language
-            if subscription is not None and subscription.language
-            else _DEFAULT_LANGUAGE
-        )
-        return cls(client=client, language=language)
+        language = _DEFAULT_LANGUAGE
+        max_chapters = _DEFAULT_MAX_CHAPTERS
+        order = _DEFAULT_ORDER
+        if subscription is not None:
+            if subscription.language:
+                language = subscription.language
+            if subscription.max_chapters is not None:
+                max_chapters = subscription.max_chapters
+            if subscription.order:
+                order = subscription.order
+        return cls(client=client, language=language, max_chapters=max_chapters, order=order)
 
     def discover(self, target_url: str) -> Iterable[ItemRef]:
         self._feed_url = target_url
@@ -170,47 +182,69 @@ class MangaDexSource(Source):
         manga_title = manga_meta["title"]
         manga_authors = manga_meta.get("authors")
 
-        try:
-            response = self.client.get(
-                f"{_API_BASE}/manga/{manga_id}/feed",
-                params={
-                    "translatedLanguage[]": self._language,
-                    "order[chapter]": "desc",
-                    "limit": str(_DISCOVER_LIMIT),
-                },
-            )
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise FetchError(f"failed to fetch feed for {manga_id}: {exc}") from exc
+        # Paginate /manga/{id}/feed using offset+limit. We keep yielding
+        # until we hit max_chapters (when nonzero) or run out of chapters.
+        target = self._max_chapters  # 0 means "no cap, paginate to exhaustion"
+        yielded = 0
+        offset = 0
 
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise ExtractionError(f"feed for {manga_id} not JSON") from exc
+        while True:
+            try:
+                response = self.client.get(
+                    f"{_API_BASE}/manga/{manga_id}/feed",
+                    params={
+                        "translatedLanguage[]": self._language,
+                        "order[chapter]": self._order,
+                        "limit": str(_PAGE_SIZE),
+                        "offset": str(offset),
+                    },
+                )
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                raise FetchError(f"failed to fetch feed for {manga_id}: {exc}") from exc
 
-        chapters = payload.get("data") or []
-        if not isinstance(chapters, list):
-            raise ExtractionError(f"feed for {manga_id} returned non-list")
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise ExtractionError(f"feed for {manga_id} not JSON") from exc
 
-        for chapter in chapters:
-            if not isinstance(chapter, dict):
-                continue
-            cid = chapter.get("id")
-            attrs = chapter.get("attributes") or {}
-            if not isinstance(cid, str) or not isinstance(attrs, dict):
-                continue
-            cache: dict[str, Any] = {
-                "manga_title": manga_title,
-                "manga_authors": manga_authors,
-                "chapter_attrs": attrs,
-            }
-            self._chapters[cid] = cache
-            yield ItemRef(
-                url=f"https://mangadex.org/chapter/{cid}",
-                title=_chapter_label(cache),
-                pub_date=_parse_iso(attrs.get("publishAt")),
-                guid=cid,
-            )
+            if self.last_known_total is None:
+                total = payload.get("total")
+                if isinstance(total, int):
+                    self.last_known_total = total
+
+            chapters = payload.get("data") or []
+            if not isinstance(chapters, list):
+                raise ExtractionError(f"feed for {manga_id} returned non-list")
+            if not chapters:
+                return
+
+            for chapter in chapters:
+                if not isinstance(chapter, dict):
+                    continue
+                cid = chapter.get("id")
+                attrs = chapter.get("attributes") or {}
+                if not isinstance(cid, str) or not isinstance(attrs, dict):
+                    continue
+                cache: dict[str, Any] = {
+                    "manga_title": manga_title,
+                    "manga_authors": manga_authors,
+                    "chapter_attrs": attrs,
+                }
+                self._chapters[cid] = cache
+                yield ItemRef(
+                    url=f"https://mangadex.org/chapter/{cid}",
+                    title=_chapter_label(cache),
+                    pub_date=_parse_iso(attrs.get("publishAt")),
+                    guid=cid,
+                )
+                yielded += 1
+                if target and yielded >= target:
+                    return
+
+            if len(chapters) < _PAGE_SIZE:
+                return  # last page
+            offset += _PAGE_SIZE
 
     def _fetch_manga_meta(self, manga_id: str) -> dict[str, Any]:
         try:

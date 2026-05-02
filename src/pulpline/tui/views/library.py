@@ -13,7 +13,13 @@ from textual.containers import Vertical
 from textual.widgets import Input, Tree
 from textual.widgets.tree import TreeNode
 
-from pulpline.state import LibraryItem, connect, delete_item, list_items
+from pulpline.state import (
+    LibraryItem,
+    connect,
+    delete_item,
+    get_subscription_state,
+    list_items,
+)
 from pulpline.tui.views.base import View
 
 
@@ -53,12 +59,13 @@ class LibraryView(View):
     def refresh_data(self) -> None:
         filter_input = self.query_one("#library-filter", Input)
         filter_text = filter_input.value.strip() or None
+        totals: dict[str, int | None] = {}
         with connect() as conn:
             items = list_items(conn, limit=500, filter_text=filter_text)
+            for bucket in {item.subscription_name for item in items if item.subscription_name}:
+                state = get_subscription_state(conn, bucket)
+                totals[bucket] = state.total_items if state else None
 
-        # Group items by their on-disk folder name: subscription_name, or
-        # "oneshots" for items without a subscription. Mirrors the layout
-        # `pulp migrate` produces under `paths.output_dir`.
         groups: dict[str, list[LibraryItem]] = defaultdict(list)
         for item in items:
             bucket = item.subscription_name or "oneshots"
@@ -70,12 +77,12 @@ class LibraryView(View):
             tree.root.add_leaf("(empty - add something with `pulp add <url>`)")
             return
 
-        # oneshots first, then subscription names alphabetically.
         ordered = sorted(groups.keys(), key=lambda k: (k != "oneshots", k))
         for bucket in ordered:
             bucket_items = groups[bucket]
+            count_label = _count_label(len(bucket_items), totals.get(bucket))
             group_node: TreeNode[LibraryItem] = tree.root.add(
-                f"{bucket}  ({len(bucket_items)})",
+                f"{bucket}  {count_label}",
                 expand=True,
             )
             for item in bucket_items:
@@ -112,6 +119,13 @@ class LibraryView(View):
         if node is None or not isinstance(node.data, LibraryItem):
             return None
         return node.data
+
+
+def _count_label(downloaded: int, total: int | None) -> str:
+    """Render '(10/358)' when total is known, '(10)' otherwise."""
+    if total is not None and total > 0:
+        return f"({downloaded}/{total})"
+    return f"({downloaded})"
 
 
 def _open_file(path: str) -> None:

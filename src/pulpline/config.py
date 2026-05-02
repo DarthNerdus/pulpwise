@@ -42,6 +42,8 @@ class Subscription:
     url: str
     output_dir: str | None = None  # None means inherit from paths.output_dir
     language: str | None = None  # source-specific (e.g. MangaDex chapter language)
+    max_chapters: int | None = None  # MangaDex: how many chapters to track. 0 = unlimited.
+    order: str | None = None  # MangaDex: "asc" (read-from-start) or "desc" (latest first).
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,19 +220,33 @@ def _sub_from_dict(raw: dict[str, object], index: int) -> Subscription:
     if language is not None and not isinstance(language, str):
         raise ConfigError(f"subscriptions[{index}].language must be a string")
 
+    max_chapters = raw.get("max_chapters")
+    if max_chapters is not None and not isinstance(max_chapters, int):
+        raise ConfigError(f"subscriptions[{index}].max_chapters must be an integer")
+
+    order = raw.get("order")
+    if order is not None and order not in {"asc", "desc"}:
+        raise ConfigError(f"subscriptions[{index}].order must be 'asc' or 'desc', got {order!r}")
+
     return Subscription(
         name=raw["name"],  # type: ignore[arg-type]
         source=raw["source"],  # type: ignore[arg-type]
         url=raw["url"],  # type: ignore[arg-type]
         output_dir=output_dir,
         language=language,
+        max_chapters=max_chapters,
+        order=order,
     )
 
 
-def _sub_to_dict(sub: Subscription) -> dict[str, str]:
-    out: dict[str, str] = {"name": sub.name, "source": sub.source, "url": sub.url}
+def _sub_to_dict(sub: Subscription) -> dict[str, object]:
+    out: dict[str, object] = {"name": sub.name, "source": sub.source, "url": sub.url}
     if sub.output_dir is not None:
         out["output_dir"] = sub.output_dir
     if sub.language is not None:
         out["language"] = sub.language
+    if sub.max_chapters is not None:
+        out["max_chapters"] = sub.max_chapters
+    if sub.order is not None:
+        out["order"] = sub.order
     return out

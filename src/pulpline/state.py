@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS subscription_state (
     name TEXT PRIMARY KEY,
     last_synced_at TEXT,
     last_status TEXT,
-    last_error TEXT
+    last_error TEXT,
+    total_items INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS items (
@@ -38,6 +39,12 @@ CREATE TABLE IF NOT EXISTS items (
 
 CREATE INDEX IF NOT EXISTS idx_items_subscription ON items(subscription_name);
 """
+
+# Forward migration: add total_items to subscription_state on older DBs.
+# SQLite doesn't have IF NOT EXISTS for ADD COLUMN, so we try and swallow.
+_MIGRATIONS = [
+    "ALTER TABLE subscription_state ADD COLUMN total_items INTEGER",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +64,7 @@ class SubscriptionState:
     last_synced_at: str | None
     last_status: str | None
     last_error: str | None
+    total_items: int | None = None  # source-reported total (e.g. MangaDex chapters)
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +91,9 @@ def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
     conn.row_factory = sqlite3.Row
     try:
         conn.executescript(_SCHEMA)
+        for migration in _MIGRATIONS:
+            with contextlib.suppress(sqlite3.OperationalError):
+                conn.execute(migration)
         yield conn
     finally:
         conn.close()
@@ -174,35 +185,59 @@ def update_subscription_state(
     name: str,
     status: str,
     error: str | None = None,
+    total_items: int | None = None,
 ) -> None:
-    """Upsert the per-subscription run state. status is 'ok' or 'error'."""
-    conn.execute(
-        """
-        INSERT INTO subscription_state (name, last_synced_at, last_status, last_error)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(name) DO UPDATE SET
-            last_synced_at = excluded.last_synced_at,
-            last_status = excluded.last_status,
-            last_error = excluded.last_error
-        """,
-        (name, _now_iso(), status, error),
-    )
+    """Upsert the per-subscription run state. status is 'ok' or 'error'.
+
+    `total_items` is preserved when None - we only update it when the source
+    reports a fresh total. Pass an int to overwrite (sources that know their
+    total population, like MangaDex's `/feed` `total` field).
+    """
+    if total_items is None:
+        conn.execute(
+            """
+            INSERT INTO subscription_state (name, last_synced_at, last_status, last_error)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                last_synced_at = excluded.last_synced_at,
+                last_status = excluded.last_status,
+                last_error = excluded.last_error
+            """,
+            (name, _now_iso(), status, error),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO subscription_state (
+                name, last_synced_at, last_status, last_error, total_items
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                last_synced_at = excluded.last_synced_at,
+                last_status = excluded.last_status,
+                last_error = excluded.last_error,
+                total_items = excluded.total_items
+            """,
+            (name, _now_iso(), status, error, total_items),
+        )
     conn.commit()
 
 
 def get_subscription_state(conn: sqlite3.Connection, name: str) -> SubscriptionState | None:
     row = conn.execute(
-        "SELECT name, last_synced_at, last_status, last_error "
+        "SELECT name, last_synced_at, last_status, last_error, total_items "
         "FROM subscription_state WHERE name = ?",
         (name,),
     ).fetchone()
     if row is None:
         return None
+    total = row["total_items"]
     return SubscriptionState(
         name=row["name"],
         last_synced_at=row["last_synced_at"],
         last_status=row["last_status"],
         last_error=row["last_error"],
+        total_items=int(total) if total is not None else None,
     )
 
 

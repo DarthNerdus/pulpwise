@@ -117,9 +117,41 @@ URLs on `mangadex.org` auto-route to the MangaDex source - no flag needed.
 The output is a `.cbz` (rather than `.epub` / `.pdf`) and ends up in the
 configured `output_dir` like every other source.
 
-**First-sync is heavy.** A subscribed manga's first sync downloads up to
-25 chapters × ~20 pages each. Expect tens of MB and a couple of minutes.
-Subsequent syncs only fetch new chapters.
+### Read-from-start workflow
+
+For long-running manga where you want to read from chapter 1, subscribe with
+`--from-start` (sets `order=asc`) and a small `--max-chapters`:
+
+```bash
+pulp add 'https://mangadex.org/title/.../berserk' -l ru --from-start --max-chapters 10
+pulp sync                       # downloads chapters 1-10
+
+# read those, then bump
+pulp extend berserk --by 10     # chapters 11-20 next sync
+pulp extend berserk --to 50     # set absolute target
+pulp extend berserk --all       # remove the cap entirely (paginate to end)
+```
+
+The TUI Library view shows `name (downloaded/total)` for MangaDex
+subscriptions once a sync has reported the total - so `berserk (10/358)`
+tells you at a glance how far you are.
+
+### Default vs from-start
+
+```bash
+# Default: latest 25 chapters, ongoing-feed style
+pulp add 'https://mangadex.org/title/.../berserk' -l ru
+
+# Latest 100 chapters
+pulp add 'https://mangadex.org/title/.../berserk' -l ru --max-chapters 100
+
+# All chapters (heavy: ~20 pages × N chapters of bandwidth)
+pulp add 'https://mangadex.org/title/.../berserk' -l ru --max-chapters 0
+```
+
+**First-sync is heavy.** A 25-chapter sync downloads ~tens of MB; an
+unbounded sync of a long-running manga downloads gigabytes. Subsequent
+syncs only fetch new chapters.
 
 ## arXiv papers
 
