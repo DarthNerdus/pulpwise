@@ -370,7 +370,8 @@ def sync() -> None:
         return
 
     typer.echo(f"syncing {len(config.subscriptions)} subscription(s)...")
-    total = pipeline.sync(config=config)
+    with _CliProgress() as reporter:
+        total = pipeline.sync(config=config, progress=reporter)
 
     for report in total.reports:
         if report.errors == 0:
@@ -390,6 +391,68 @@ def sync() -> None:
 
     if total.total_errors:
         raise typer.Exit(code=1)
+
+
+class _CliProgress:
+    """rich-Progress-backed `ProgressReporter` for `pulp sync`.
+
+    Each subscription gets a task with a progress bar; the current item's
+    title shows next to the bar while it's being fetched. Rich auto-detects
+    non-TTY stdout (cron logs) and falls back to compact text output.
+    """
+
+    def __init__(self) -> None:
+        from rich.progress import (
+            BarColumn,
+            Progress,
+            SpinnerColumn,
+            TaskID,
+            TextColumn,
+            TimeElapsedColumn,
+        )
+
+        self._progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[bold]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TextColumn("[dim]{task.fields[item]}"),
+            TimeElapsedColumn(),
+            transient=False,
+        )
+        self._tasks: dict[str, TaskID] = {}
+
+    def __enter__(self) -> _CliProgress:
+        self._progress.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._progress.stop()
+
+    def subscription_discovered(self, name: str, item_total: int) -> None:
+        task_id = self._progress.add_task(name, total=max(item_total, 1), item="discovering...")
+        self._tasks[name] = task_id
+
+    def item_started(self, name: str, title: str) -> None:
+        if name not in self._tasks:
+            return
+        short = title if len(title) <= 60 else title[:57] + "..."
+        self._progress.update(self._tasks[name], item=short)
+
+    def item_finished(self, name: str, *, skipped: bool = False) -> None:
+        if name not in self._tasks:
+            return
+        self._progress.advance(self._tasks[name])
+        if skipped:
+            self._progress.update(self._tasks[name], item="(already have)")
+
+    def subscription_finished(self, name: str, report: pipeline.SyncReport) -> None:
+        if name not in self._tasks:
+            return
+        if report.errors:
+            self._progress.update(self._tasks[name], item=f"[red]{report.errors} error(s)[/red]")
+        else:
+            self._progress.update(self._tasks[name], item="done")
 
 
 @app.command("list")

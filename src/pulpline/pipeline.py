@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Protocol
 
 import httpx
 
@@ -49,6 +50,23 @@ class SyncTotal:
     @property
     def total_errors(self) -> int:
         return sum(r.errors for r in self.reports)
+
+
+class ProgressReporter(Protocol):
+    """Callback protocol for `sync()` progress events.
+
+    Implemented by the CLI's rich-progress wrapper. None-passed when no
+    progress UI is desired (tests, scripted use). All methods are optional
+    in spirit: missing methods may be implemented as no-ops by callers.
+    """
+
+    def subscription_discovered(self, name: str, item_total: int) -> None: ...
+
+    def item_started(self, name: str, title: str) -> None: ...
+
+    def item_finished(self, name: str, *, skipped: bool = False) -> None: ...
+
+    def subscription_finished(self, name: str, report: SyncReport) -> None: ...
 
 
 def add_once(
@@ -108,17 +126,21 @@ def sync(
     config: Config | None = None,
     state_path: Path | None = None,
     client: httpx.Client | None = None,
+    progress: ProgressReporter | None = None,
 ) -> SyncTotal:
     """Run all subscriptions; for each, write EPUBs for any not-yet-seen items.
 
     Errors at feed level (network, parse) and item level (fetch, extract) are
     skip+log+continue per the spec; they end up in `SyncReport.error_messages`.
+
+    `progress` is an optional reporter that receives subscription/item-level
+    events as they happen. Pass None for silent operation (tests, scripts).
     """
     cfg = config or load_config()
     reports: list[SyncReport] = []
     with connect(state_path) as conn:
         for sub in cfg.subscriptions:
-            reports.append(_sync_subscription(sub, cfg, conn, client))
+            reports.append(_sync_subscription(sub, cfg, conn, client, progress))
     return SyncTotal(reports=tuple(reports))
 
 
@@ -127,19 +149,27 @@ def _sync_subscription(
     cfg: Config,
     conn: sqlite3.Connection,
     client: httpx.Client | None,
+    progress: ProgressReporter | None,
 ) -> SyncReport:
     try:
         source_cls = get_source(sub.source)
     except ValueError as exc:
         update_subscription_state(conn, sub.name, "error", str(exc))
-        return SyncReport(sub.name, 0, 0, 1, (str(exc),))
+        report = SyncReport(sub.name, 0, 0, 1, (str(exc),))
+        if progress is not None:
+            progress.subscription_finished(sub.name, report)
+        return report
 
     try:
         with source_cls.from_config(cfg, client=client, subscription=sub) as source:
-            return _sync_with_source(sub, cfg, conn, source)
+            report = _sync_with_source(sub, cfg, conn, source, progress)
     except (FetchError, ExtractionError) as exc:
         update_subscription_state(conn, sub.name, "error", str(exc))
-        return SyncReport(sub.name, 0, 0, 1, (str(exc),))
+        report = SyncReport(sub.name, 0, 0, 1, (str(exc),))
+
+    if progress is not None:
+        progress.subscription_finished(sub.name, report)
+    return report
 
 
 def _sync_with_source(
@@ -147,8 +177,11 @@ def _sync_with_source(
     cfg: Config,
     conn: sqlite3.Connection,
     source: Source,
+    progress: ProgressReporter | None,
 ) -> SyncReport:
     refs = list(source.discover(sub.url))
+    if progress is not None:
+        progress.subscription_discovered(sub.name, len(refs))
 
     output_dir = cfg.output_dir_for(sub)
     sink = FilesystemSink(output_dir)
@@ -163,7 +196,11 @@ def _sync_with_source(
         if was_ingested(conn, key):
             # Includes soft-deleted items - don't re-fetch what the user deleted.
             skipped += 1
+            if progress is not None:
+                progress.item_finished(sub.name, skipped=True)
             continue
+        if progress is not None:
+            progress.item_started(sub.name, ref.title or ref.url)
         try:
             article = source.fetch(ref)
             article = replace(article, subscription_name=sub.name)
@@ -185,6 +222,8 @@ def _sync_with_source(
         except (FetchError, ExtractionError) as exc:
             errors += 1
             error_msgs.append(f"{ref.url}: {exc}")
+        if progress is not None:
+            progress.item_finished(sub.name)
 
     status = "ok" if errors == 0 else "error"
     error_summary = "; ".join(error_msgs) if error_msgs else None
