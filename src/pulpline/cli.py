@@ -337,6 +337,14 @@ def list_(
 
 
 @app.command()
+def tui() -> None:
+    """Launch the interactive Textual TUI (Library + Stats views)."""
+    from pulpline.tui.app import run
+
+    run()
+
+
+@app.command()
 def remove(
     name: str = typer.Argument(..., help="Subscription name to remove."),
 ) -> None:

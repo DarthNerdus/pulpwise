@@ -12,7 +12,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 _SCHEMA = """
@@ -176,6 +176,100 @@ def list_oneshots(conn: sqlite3.Connection, limit: int = 20) -> list[OneShotItem
         )
         for row in rows
     ]
+
+
+@dataclass(frozen=True, slots=True)
+class LibraryItem:
+    title: str | None
+    canonical_url: str
+    subscription_name: str | None
+    ingested_at: str
+    pub_date: str | None
+    output_path: str | None
+
+
+def list_items(
+    conn: sqlite3.Connection,
+    limit: int = 500,
+    filter_text: str | None = None,
+) -> list[LibraryItem]:
+    """Return recent items, optionally filtered by case-insensitive title/url match."""
+    sql = (
+        "SELECT title, canonical_url, subscription_name, ingested_at, pub_date, output_path "
+        "FROM items"
+    )
+    params: list[object] = []
+    if filter_text:
+        sql += " WHERE LOWER(title) LIKE ? OR LOWER(canonical_url) LIKE ?"
+        like = f"%{filter_text.lower()}%"
+        params.extend([like, like])
+    sql += " ORDER BY ingested_at DESC, id DESC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
+    return [
+        LibraryItem(
+            title=row["title"],
+            canonical_url=row["canonical_url"],
+            subscription_name=row["subscription_name"],
+            ingested_at=row["ingested_at"],
+            pub_date=row["pub_date"],
+            output_path=row["output_path"],
+        )
+        for row in rows
+    ]
+
+
+def count_total(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT COUNT(*) AS n FROM items").fetchone()
+    return int(row["n"]) if row else 0
+
+
+def count_since(conn: sqlite3.Connection, since_iso: str) -> int:
+    """Count items where `ingested_at >= since_iso` (lexicographic on ISO 8601)."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM items WHERE ingested_at >= ?",
+        (since_iso,),
+    ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def count_by_subscription(conn: sqlite3.Connection) -> dict[str, int]:
+    """Items grouped by subscription_name. NULL is bucketed as '[one-shot]'."""
+    rows = conn.execute(
+        "SELECT COALESCE(subscription_name, '[one-shot]') AS bucket, COUNT(*) AS n "
+        "FROM items GROUP BY bucket ORDER BY n DESC"
+    ).fetchall()
+    return {row["bucket"]: int(row["n"]) for row in rows}
+
+
+def count_by_extension(conn: sqlite3.Connection) -> dict[str, int]:
+    """Items grouped by file extension (extracted from output_path)."""
+    rows = conn.execute("SELECT output_path FROM items WHERE output_path IS NOT NULL").fetchall()
+    counts: dict[str, int] = {}
+    for row in rows:
+        path = row["output_path"]
+        if not isinstance(path, str):
+            continue
+        ext = path.rsplit(".", 1)[-1].lower() if "." in path else "(none)"
+        counts[ext] = counts.get(ext, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: kv[1], reverse=True))
+
+
+def items_per_day(conn: sqlite3.Connection, days: int = 30) -> list[tuple[str, int]]:
+    """Return [(YYYY-MM-DD, count), ...] for the last `days` days, including zeros."""
+    rows = conn.execute(
+        "SELECT substr(ingested_at, 1, 10) AS day, COUNT(*) AS n "
+        "FROM items GROUP BY day ORDER BY day DESC LIMIT ?",
+        (days,),
+    ).fetchall()
+    by_day = {row["day"]: int(row["n"]) for row in rows}
+
+    today = datetime.now(tz=UTC).date()
+    out: list[tuple[str, int]] = []
+    for offset in range(days):
+        day = today - timedelta(days=offset)
+        out.append((day.isoformat(), by_day.get(day.isoformat(), 0)))
+    return out
 
 
 def _now_iso() -> str:

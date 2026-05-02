@@ -51,6 +51,25 @@ pulp remove simon-willison-s-weblog
 
 `pulp add` auto-classifies each URL: real feeds get subscribed, single articles get one-shot. Use `--once` or `--feed` to override for the whole call. Errors on one URL do not abort the rest of the batch.
 
+## TUI
+
+For a more interactive view of your library and ingestion stats:
+
+```bash
+pulp tui
+```
+
+Two tabs:
+
+- **Library**: every ingested item, filterable by title or URL. `/` focuses
+  the filter, `enter` opens the highlighted file in your OS default app
+  (Preview / xdg-open / Explorer).
+- **Stats**: total / 7-day / 30-day / 1-year counts, per-source bars,
+  per-format bars (EPUB vs PDF), 30-day daily activity bars.
+
+`tab` cycles tabs, `r` refreshes data, `q` quits. Adding a new view is one
+file in `src/pulpline/tui/views/` plus an entry in `views/__init__.VIEWS`.
+
 ## arXiv papers
 
 Pulpline ships an `arxiv` source that downloads the actual PDF instead of

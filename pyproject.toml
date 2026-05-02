@@ -31,6 +31,7 @@ dependencies = [
     "trafilatura>=1.12",
     "ebooklib>=0.18",
     "tomli-w>=1.0",
+    "textual>=0.86",
 ]
 
 [project.scripts]
