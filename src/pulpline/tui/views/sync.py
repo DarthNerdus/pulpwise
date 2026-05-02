@@ -127,9 +127,12 @@ def _syncthing_text(status: SyncthingStatus) -> Text:
         return text
 
     version_str = f" {status.version}" if status.version else ""
-    text.append(f"  Daemon:  [green]running[/green]{version_str}")
+    text.append("  Daemon:  ")
+    text.append("running", style="green")
+    text.append(version_str)
     if status.my_id:
-        text.append(f"   ID: [dim]{status.my_id[:7]}-...[/dim]")
+        text.append("   ID: ")
+        text.append(f"{status.my_id[:7]}-...", style="dim")
     text.append("\n\n")
 
     remote_devices = [d for d in status.devices if not d.is_self]
@@ -139,14 +142,18 @@ def _syncthing_text(status: SyncthingStatus) -> Text:
         for dev in remote_devices:
             text.append_text(_device_line(dev, name_w))
     else:
-        text.append("  Devices:  [dim]none paired[/dim]\n")
+        text.append("  Devices:  ")
+        text.append("none paired", style="dim")
+        text.append("\n")
 
     if status.folders:
         text.append("\n  Folders:\n")
         for folder in status.folders:
             text.append_text(_folder_line(folder, status.my_id))
     else:
-        text.append("\n  Folders:  [dim]none configured[/dim]\n")
+        text.append("\n  Folders:  ")
+        text.append("none configured", style="dim")
+        text.append("\n")
 
     return text
 
