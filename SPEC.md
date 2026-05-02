@@ -234,8 +234,8 @@ Not subscriptions; ad-hoc lookups. User invokes, picks a result, downloads once.
 
 ## 6. Current State
 
-- **Last Updated:** 2026-05-02
-- **Status:** Phases 0 + 1 + 2 + 3 complete. `pulp add` auto-classifies feed vs article (overridable with `--once`/`--feed`); `sync`/`list`/`remove` functional. Wheel installs cleanly via `uv tool install` / `pipx install` and runs end-to-end. `make check` green: 80 tests, 88.4% coverage, mypy strict + ruff clean. Pending user actions: 1-week personal dogfooding on Palma 2, version bump 0.1.0.dev0 -> 0.1.0, PyPI publish.
+- **Last Updated:** 2026-05-03
+- **Status:** v0.1.0 (beta). Spec phases 0-3 complete; post-MVP roadmap items shipped: Substack source + bulk importer (cookie auth), arXiv (PDF passthrough), MangaDex (CBZ + read-from-start), OPML import, TUI (Library/Subscriptions/Sync/Stats), syncthing CLI integration, CLI progress bars during sync. GitHub Actions CI configured. PyPI publish staged but not yet executed.
 - **Working directory:** `/Users/egorkonovalov/pulpline`
 
 ### Locked decisions (recorded so they don't get re-litigated)

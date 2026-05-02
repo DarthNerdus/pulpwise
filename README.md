@@ -1,10 +1,12 @@
 # pulpline
 
-Local-first content pipeline for e-readers. Pulls articles, papers, and newsletters from RSS feeds and arbitrary URLs, converts them to EPUBs with full Dublin Core metadata, and writes them to a folder you sync to your reader. No cloud service. No subscription. No manual file shuffling.
+[![CI](https://github.com/wtfnukee/pulpline/actions/workflows/ci.yml/badge.svg)](https://github.com/wtfnukee/pulpline/actions/workflows/ci.yml)
+
+Local-first content pipeline for e-readers. Pulls articles, papers, newsletters, and manga from RSS feeds, Substack (paid + free), arXiv, MangaDex, and arbitrary URLs - converts each to a format your reader handles natively (EPUB / PDF / CBZ), and writes them to a folder you sync to your device. No cloud service. No subscription. No manual file shuffling.
 
 ## Status
 
-Pre-alpha (`0.1.0.dev0`). The MVP command surface (`add`, `sync`, `list`, `remove`) works end-to-end. See [SPEC.md](SPEC.md) for the design and roadmap.
+`0.1.0` (beta). The full command surface ships: `add`, `sync`, `list`, `remove`, `extend`, `migrate`, `import` (substack/opml), and an interactive `tui`. See [SPEC.md](SPEC.md) for the design and roadmap.
 
 ## Install
 
