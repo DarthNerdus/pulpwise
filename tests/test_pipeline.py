@@ -24,7 +24,8 @@ def test_add_once_writes_a_real_epub(
 
     assert out_path.exists()
     assert out_path.suffix == ".epub"
-    assert out_path.parent == tmp_path
+    # One-shots land in the `oneshots/` subfolder under the configured output dir.
+    assert out_path.parent == tmp_path / "oneshots"
 
     book = epub.read_epub(str(out_path))
     titles = book.get_metadata("DC", "title")
@@ -44,4 +45,4 @@ def test_add_once_uses_default_output_dir_when_none(
 
     out_path = pipeline.add_once(url, client=client)
 
-    assert out_path.parent == tmp_path
+    assert out_path.parent == tmp_path / "oneshots"

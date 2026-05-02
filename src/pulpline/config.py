@@ -73,7 +73,15 @@ class Config:
         return None
 
     def output_dir_for(self, sub: Subscription) -> Path:
-        return Path(sub.output_dir or self.paths.output_dir).expanduser()
+        """Where this subscription's items should be written.
+
+        If `sub.output_dir` is set explicitly, use it as-is (escape hatch).
+        Otherwise, auto-organize: `<paths.output_dir>/<sub.name>/` so each
+        subscription gets its own subfolder.
+        """
+        if sub.output_dir is not None:
+            return Path(sub.output_dir).expanduser()
+        return Path(self.paths.output_dir).expanduser() / sub.name
 
 
 def default_config_path() -> Path:

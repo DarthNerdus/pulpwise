@@ -82,10 +82,10 @@ def test_load_rejects_duplicate_subscription_names(tmp_path: Path) -> None:
         load_config(target)
 
 
-def test_output_dir_for_uses_global_default() -> None:
+def test_output_dir_for_auto_subfolder_by_sub_name() -> None:
     config = Config()
-    sub = Subscription(name="a", source="rss", url="x")
-    assert config.output_dir_for(sub) == Path("~/Sync/Pulpline").expanduser()
+    sub = Subscription(name="samkriss", source="rss", url="x")
+    assert config.output_dir_for(sub) == Path("~/Sync/Pulpline/samkriss").expanduser()
 
 
 def test_output_dir_for_uses_per_subscription_override() -> None:

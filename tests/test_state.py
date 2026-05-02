@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
-
-import pytest
 
 from pulpline.state import (
     ItemRecord,
@@ -46,12 +43,79 @@ def test_is_seen_returns_path_after_record(tmp_path: Path) -> None:
         assert is_seen(conn, "k1") == "/tmp/article.epub"
 
 
-def test_record_item_rejects_duplicate_dedup_key(tmp_path: Path) -> None:
+def test_record_item_upserts_on_duplicate_dedup_key(tmp_path: Path) -> None:
+    """Re-recording with an existing dedup_key updates the row in place.
+
+    This handles re-ingestion after a soft delete: `pulp add <url>` on a
+    previously-deleted article should not fail on the UNIQUE constraint.
+    """
+    from pulpline.state import is_seen
+
     db = tmp_path / "state.db"
     with connect(db) as conn:
-        record_item(conn, _record(dedup="k1"))
-        with pytest.raises(sqlite3.IntegrityError):
-            record_item(conn, _record(dedup="k1"))
+        record_item(conn, _record(dedup="k1", path="/tmp/old.epub"))
+        record_item(conn, _record(dedup="k1", path="/tmp/new.epub"))
+        # Single row, with the latest output_path.
+        rows = conn.execute("SELECT output_path FROM items WHERE dedup_key = ?", ("k1",)).fetchall()
+        assert len(rows) == 1
+        assert is_seen(conn, "k1") == "/tmp/new.epub"
+
+
+def test_was_ingested_distinguishes_from_is_seen(tmp_path: Path) -> None:
+    """`was_ingested` is True even after a soft delete; `is_seen` is not."""
+    from pulpline.state import delete_item, is_seen, was_ingested
+
+    db = tmp_path / "state.db"
+    target_file = tmp_path / "kept.epub"
+    target_file.write_bytes(b"x")
+
+    with connect(db) as conn:
+        record_item(conn, _record(dedup="k1", path=str(target_file)))
+        assert is_seen(conn, "k1") == str(target_file)
+        assert was_ingested(conn, "k1") is True
+
+        item_id = conn.execute("SELECT id FROM items WHERE dedup_key = ?", ("k1",)).fetchone()["id"]
+        delete_item(conn, item_id)
+
+        # File is gone, output_path is null.
+        assert not target_file.exists()
+        assert is_seen(conn, "k1") is None
+        assert was_ingested(conn, "k1") is True
+
+
+def test_delete_item_then_record_revives(tmp_path: Path) -> None:
+    """Soft-deleted items can be re-ingested via the record_item upsert."""
+    from pulpline.state import delete_item, is_seen
+
+    db = tmp_path / "state.db"
+    f1 = tmp_path / "v1.epub"
+    f1.write_bytes(b"x")
+    with connect(db) as conn:
+        record_item(conn, _record(dedup="k1", path=str(f1)))
+        item_id = conn.execute("SELECT id FROM items WHERE dedup_key = ?", ("k1",)).fetchone()["id"]
+        delete_item(conn, item_id)
+
+        # Re-ingest with new path.
+        f2 = tmp_path / "v2.epub"
+        f2.write_bytes(b"y")
+        record_item(conn, _record(dedup="k1", path=str(f2)))
+
+        assert is_seen(conn, "k1") == str(f2)
+
+
+def test_list_items_excludes_soft_deleted(tmp_path: Path) -> None:
+    from pulpline.state import delete_item, list_items
+
+    db = tmp_path / "state.db"
+    with connect(db) as conn:
+        record_item(conn, _record(dedup="k1", path="/tmp/a.epub"))
+        record_item(conn, _record(dedup="k2", path="/tmp/b.epub"))
+        item_id = conn.execute("SELECT id FROM items WHERE dedup_key = ?", ("k1",)).fetchone()["id"]
+        delete_item(conn, item_id)
+
+        items = list_items(conn)
+    assert len(items) == 1
+    assert items[0].output_path == "/tmp/b.epub"
 
 
 def test_list_items_returns_recent_first(tmp_path: Path) -> None:

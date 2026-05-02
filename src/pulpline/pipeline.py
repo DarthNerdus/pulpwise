@@ -20,6 +20,7 @@ from pulpline.state import (
     is_seen,
     record_item,
     update_subscription_state,
+    was_ingested,
 )
 from pulpline.util.dedup import dedup_key
 
@@ -65,7 +66,8 @@ def add_once(
     If `url` has already been ingested, returns the existing path without
     re-fetching. Re-runs are idempotent.
     """
-    target = (output_dir or default_output_dir()).expanduser()
+    base = (output_dir or default_output_dir()).expanduser()
+    target = base / "oneshots"
     key = dedup_key(url)
 
     source_cls = _pick_source_for_url(url)
@@ -168,7 +170,8 @@ def _sync_with_source(
 
     for ref in refs:
         key = dedup_key(ref.url)
-        if is_seen(conn, key) is not None:
+        if was_ingested(conn, key):
+            # Includes soft-deleted items - don't re-fetch what the user deleted.
             skipped += 1
             continue
         try:

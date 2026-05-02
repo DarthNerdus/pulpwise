@@ -11,7 +11,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import DataTable, Input
 
-from pulpline.state import LibraryItem, connect, list_items
+from pulpline.state import LibraryItem, connect, delete_item, list_items
 from pulpline.tui.views.base import View
 
 
@@ -22,6 +22,7 @@ class LibraryView(View):
     BINDINGS = [  # noqa: RUF012
         ("/", "focus_filter", "Filter"),
         ("enter", "open_file", "Open"),
+        ("d", "delete_file", "Delete"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -65,6 +66,17 @@ class LibraryView(View):
         item = self._items[table.cursor_row]
         if item.output_path:
             _open_file(item.output_path)
+
+    def action_delete_file(self) -> None:
+        table = self.query_one(DataTable)
+        if table.cursor_row is None or table.cursor_row >= len(self._items):
+            return
+        item = self._items[table.cursor_row]
+        title = item.title or "(untitled)"
+        with connect() as conn:
+            delete_item(conn, item.id)
+        self.refresh_data()
+        self.notify(f"deleted {title!r}", severity="information")
 
 
 def _short_date(iso: str) -> str:

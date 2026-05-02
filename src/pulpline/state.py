@@ -7,6 +7,7 @@ state DB should be deletable + rebuildable from config without losing what to fe
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 from collections.abc import Iterator
@@ -88,21 +89,56 @@ def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
 
 
 def is_seen(conn: sqlite3.Connection, dedup_key: str) -> str | None:
-    """Return the existing output_path if `dedup_key` is already in items, else None."""
+    """Return the existing output_path if `dedup_key` has a *live* item row.
+
+    Live = the row exists AND output_path is not NULL (i.e. not soft-deleted).
+    Used by `add_once` for idempotency: if the file is "claimed" by an item
+    record, return its path. Soft-deleted items return None so re-running
+    `pulp add` re-ingests them.
+
+    For "should sync skip this URL?" use `was_ingested` instead - that's a
+    broader check that includes soft-deleted items (we don't want sync
+    to re-fetch what the user deleted).
+    """
     row = conn.execute("SELECT output_path FROM items WHERE dedup_key = ?", (dedup_key,)).fetchone()
-    if row is None:
+    if row is None or row["output_path"] is None:
         return None
-    return str(row["output_path"]) if row["output_path"] is not None else None
+    return str(row["output_path"])
+
+
+def was_ingested(conn: sqlite3.Connection, dedup_key: str) -> bool:
+    """True if `dedup_key` has any row at all, including soft-deleted ones.
+
+    Used by sync to decide "skip this item" without re-fetching things the
+    user explicitly deleted.
+    """
+    return (
+        conn.execute("SELECT 1 FROM items WHERE dedup_key = ? LIMIT 1", (dedup_key,)).fetchone()
+        is not None
+    )
 
 
 def record_item(conn: sqlite3.Connection, item: ItemRecord) -> None:
-    """Insert a new item. Caller must check `is_seen` first to avoid IntegrityError."""
+    """Insert a new item, or update the existing row on dedup_key conflict.
+
+    The `ON CONFLICT` upsert handles re-ingestion after soft delete:
+    `pulp add <url>` on a previously-deleted article updates the existing
+    row in place rather than failing on the UNIQUE constraint.
+    """
     conn.execute(
         """
         INSERT INTO items (
             subscription_name, source_url, dedup_key, canonical_url,
             title, pub_date, ingested_at, output_path
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(dedup_key) DO UPDATE SET
+            subscription_name = excluded.subscription_name,
+            source_url = excluded.source_url,
+            canonical_url = excluded.canonical_url,
+            title = excluded.title,
+            pub_date = excluded.pub_date,
+            ingested_at = excluded.ingested_at,
+            output_path = excluded.output_path
         """,
         (
             item.subscription_name,
@@ -115,6 +151,21 @@ def record_item(conn: sqlite3.Connection, item: ItemRecord) -> None:
             item.output_path,
         ),
     )
+    conn.commit()
+
+
+def delete_item(conn: sqlite3.Connection, item_id: int) -> None:
+    """Soft-delete: remove the file from disk and null out `output_path`.
+
+    Keeps the row in `items` so dedup remembers the URL was ingested - sync
+    won't re-fetch it. To bring it back, `pulp add <url>` re-ingests via the
+    upsert path in `record_item`.
+    """
+    row = conn.execute("SELECT output_path FROM items WHERE id = ?", (item_id,)).fetchone()
+    if row is not None and row["output_path"]:
+        with contextlib.suppress(OSError):
+            Path(str(row["output_path"])).unlink(missing_ok=True)
+    conn.execute("UPDATE items SET output_path = NULL WHERE id = ?", (item_id,))
     conn.commit()
 
 
@@ -163,7 +214,7 @@ def list_oneshots(conn: sqlite3.Connection, limit: int = 20) -> list[OneShotItem
     """
     rows = conn.execute(
         "SELECT title, canonical_url, ingested_at, output_path FROM items "
-        "WHERE subscription_name IS NULL "
+        "WHERE subscription_name IS NULL AND output_path IS NOT NULL "
         "ORDER BY ingested_at DESC LIMIT ?",
         (limit,),
     ).fetchall()
@@ -180,6 +231,7 @@ def list_oneshots(conn: sqlite3.Connection, limit: int = 20) -> list[OneShotItem
 
 @dataclass(frozen=True, slots=True)
 class LibraryItem:
+    id: int
     title: str | None
     canonical_url: str
     subscription_name: str | None
@@ -195,12 +247,12 @@ def list_items(
 ) -> list[LibraryItem]:
     """Return recent items, optionally filtered by case-insensitive title/url match."""
     sql = (
-        "SELECT title, canonical_url, subscription_name, ingested_at, pub_date, output_path "
-        "FROM items"
+        "SELECT id, title, canonical_url, subscription_name, ingested_at, pub_date, output_path "
+        "FROM items WHERE output_path IS NOT NULL"
     )
     params: list[object] = []
     if filter_text:
-        sql += " WHERE LOWER(title) LIKE ? OR LOWER(canonical_url) LIKE ?"
+        sql += " AND (LOWER(title) LIKE ? OR LOWER(canonical_url) LIKE ?)"
         like = f"%{filter_text.lower()}%"
         params.extend([like, like])
     sql += " ORDER BY ingested_at DESC, id DESC LIMIT ?"
@@ -208,6 +260,7 @@ def list_items(
     rows = conn.execute(sql, params).fetchall()
     return [
         LibraryItem(
+            id=int(row["id"]),
             title=row["title"],
             canonical_url=row["canonical_url"],
             subscription_name=row["subscription_name"],
@@ -220,24 +273,26 @@ def list_items(
 
 
 def count_total(conn: sqlite3.Connection) -> int:
-    row = conn.execute("SELECT COUNT(*) AS n FROM items").fetchone()
+    """Count of currently-extant items (excludes soft-deleted)."""
+    row = conn.execute("SELECT COUNT(*) AS n FROM items WHERE output_path IS NOT NULL").fetchone()
     return int(row["n"]) if row else 0
 
 
 def count_since(conn: sqlite3.Connection, since_iso: str) -> int:
-    """Count items where `ingested_at >= since_iso` (lexicographic on ISO 8601)."""
+    """Count currently-extant items ingested on or after `since_iso`."""
     row = conn.execute(
-        "SELECT COUNT(*) AS n FROM items WHERE ingested_at >= ?",
+        "SELECT COUNT(*) AS n FROM items WHERE ingested_at >= ? AND output_path IS NOT NULL",
         (since_iso,),
     ).fetchone()
     return int(row["n"]) if row else 0
 
 
 def count_by_subscription(conn: sqlite3.Connection) -> dict[str, int]:
-    """Items grouped by subscription_name. NULL is bucketed as '[one-shot]'."""
+    """Items (excluding soft-deleted) grouped by subscription_name."""
     rows = conn.execute(
         "SELECT COALESCE(subscription_name, '[one-shot]') AS bucket, COUNT(*) AS n "
-        "FROM items GROUP BY bucket ORDER BY n DESC"
+        "FROM items WHERE output_path IS NOT NULL "
+        "GROUP BY bucket ORDER BY n DESC"
     ).fetchall()
     return {row["bucket"]: int(row["n"]) for row in rows}
 
@@ -259,7 +314,8 @@ def items_per_day(conn: sqlite3.Connection, days: int = 30) -> list[tuple[str, i
     """Return [(YYYY-MM-DD, count), ...] for the last `days` days, including zeros."""
     rows = conn.execute(
         "SELECT substr(ingested_at, 1, 10) AS day, COUNT(*) AS n "
-        "FROM items GROUP BY day ORDER BY day DESC LIMIT ?",
+        "FROM items WHERE output_path IS NOT NULL "
+        "GROUP BY day ORDER BY day DESC LIMIT ?",
         (days,),
     ).fetchall()
     by_day = {row["day"]: int(row["n"]) for row in rows}

@@ -131,5 +131,5 @@ def test_add_once_is_idempotent_via_dedup(
     second = pipeline.add_once(url, output_dir=tmp_path, client=client)
 
     assert first == second
-    # The article was written exactly once.
-    assert len(list(tmp_path.glob("*.epub"))) == 1
+    # The article was written exactly once - in the oneshots subfolder.
+    assert len(list((tmp_path / "oneshots").glob("*.epub"))) == 1

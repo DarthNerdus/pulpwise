@@ -153,6 +153,51 @@ Cookies expire after a few weeks; when they do, re-export and update the
 Cookie files contain session credentials - treat them like passwords. They
 sit in `~/.config/pulpline/` by convention, which is `chmod 600`-able.
 
+## File organization + deletion
+
+Pulpline lays out items in subfolders under your `output_dir`:
+
+```
+~/Sync/Pulpline/
+├── samkriss/               # one folder per subscription (auto-named after sub)
+│   ├── How to live without your phone.epub
+│   └── ...
+├── arxiv-cs-ai/
+│   └── 2401.12345v1.pdf
+├── etymology/
+│   └── ...
+└── oneshots/               # `pulp add <url>` items without a subscription
+    └── What You Can't Say.epub
+```
+
+The folder name comes from the subscription's `name` automatically. To put a
+specific subscription somewhere else, set `output_dir` on that subscription
+in `~/.config/pulpline/config.toml`:
+
+```toml
+[[subscriptions]]
+name = "berserk"
+source = "mangadex"
+url = "..."
+output_dir = "~/Sync/Manga/Berserk"   # explicit override; no auto-subfolder
+```
+
+### Deleting read items
+
+In the TUI Library view, `d` deletes the highlighted file. Pulpline does a
+**soft delete**:
+
+- The file is removed from disk (and Syncthing pushes the deletion to your reader)
+- The item's row in the dedup ledger is kept, with `output_path` cleared
+- The next `pulp sync` will *not* re-fetch the deleted article
+
+Re-running `pulp add <url>` on a soft-deleted article re-ingests it - the
+dedup row is updated in place. So `d` is "I'm done with this" and `pulp add`
+is "actually I want it back."
+
+The Library and Stats views only count currently-extant items; deleted
+articles drop out of the stats once they're gone from disk.
+
 ## Configuration
 
 `~/.config/pulpline/config.toml` is created on first run. Hand-editable:
