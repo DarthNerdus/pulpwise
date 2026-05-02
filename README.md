@@ -33,6 +33,12 @@ pulp add https://simonwillison.net/atom/everything/
 # Fetch a single article (auto-detected as article)
 pulp add https://stratechery.com/2026/the-end-of-the-beginning/
 
+# Batch - any mix of feeds and articles, each classified independently
+pulp add https://a.example/feed https://b.example/article https://c.example/post
+
+# Paste a list of tab URLs from your clipboard
+pbpaste | xargs pulp add
+
 # Sync new items from all subscriptions
 pulp sync
 
@@ -43,7 +49,7 @@ pulp list
 pulp remove simon-willison-s-weblog
 ```
 
-`pulp add` auto-classifies the URL: real feeds get subscribed, single articles get one-shot. Use `--once` or `--feed` to override when detection guesses wrong.
+`pulp add` auto-classifies each URL: real feeds get subscribed, single articles get one-shot. Use `--once` or `--feed` to override for the whole call. Errors on one URL do not abort the rest of the batch.
 
 ## Configuration
 

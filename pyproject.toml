@@ -95,5 +95,8 @@ target-version = "py314"
 select = ["E", "F", "I", "B", "UP", "N", "RUF", "SIM", "PTH", "RET"]
 ignore = []
 
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["typer.Argument", "typer.Option"]
+
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B"]

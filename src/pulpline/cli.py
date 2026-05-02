@@ -50,7 +50,11 @@ def _main(
 
 @app.command()
 def add(
-    url: str = typer.Argument(..., help="Feed URL (subscribe) or article URL (one-shot)."),
+    urls: list[str] = typer.Argument(
+        ...,
+        help="One or more URLs. Each is auto-classified independently.",
+        metavar="URL [URL ...]",
+    ),
     once: bool = typer.Option(
         False,
         "--once",
@@ -65,7 +69,7 @@ def add(
         None,
         "--name",
         "-n",
-        help="Subscription name (default: derived from feed title).",
+        help="Subscription name (only valid with a single URL).",
     ),
     output_dir: str | None = typer.Option(
         None,
@@ -73,27 +77,36 @@ def add(
         help="Per-subscription output directory override.",
     ),
 ) -> None:
-    """Add a subscription, or fetch a single article one-shot.
+    """Add one or more URLs.
 
-    By default the URL is auto-classified - real feeds get subscribed, single
-    articles get one-shot. Use `--once` to force one-shot or `--feed` to force
-    subscribe when detection guesses wrong.
+    Each URL is auto-classified independently: feeds are subscribed, single
+    articles are one-shot. Use `--once` or `--feed` to override detection for
+    every URL in the call. Errors on individual URLs do not abort the batch.
     """
     if once and feed:
         typer.echo("--once and --feed are mutually exclusive.", err=True)
         raise typer.Exit(code=2)
+    if name is not None and len(urls) > 1:
+        typer.echo("--name only applies when adding a single URL.", err=True)
+        raise typer.Exit(code=2)
 
-    if once:
-        _add_once(url)
-        return
-    if feed:
-        _subscribe(url, name=name, output_dir=output_dir)
-        return
+    successes = 0
+    failures = 0
+    for url in urls:
+        if once:
+            ok = _add_once(url)
+        elif feed or _looks_like_feed(url):
+            ok = _subscribe(url, name=name, output_dir=output_dir)
+        else:
+            ok = _add_once(url)
+        successes += int(ok)
+        failures += int(not ok)
 
-    if _looks_like_feed(url):
-        _subscribe(url, name=name, output_dir=output_dir)
-    else:
-        _add_once(url)
+    if len(urls) > 1:
+        typer.echo(f"\nbatch: {successes} ok, {failures} failed")
+
+    if failures:
+        raise typer.Exit(code=1)
 
 
 def _looks_like_feed(url: str) -> bool:
@@ -105,24 +118,25 @@ def _looks_like_feed(url: str) -> bool:
             parsed = feedparser.parse(response.content)
             return bool(parsed.entries)
     except httpx.HTTPError, ValueError:
-        # Network or parse failure - fall back to one-shot. The actual fetch
-        # will surface a useful error to the user from there.
         return False
 
 
-def _add_once(url: str) -> None:
+def _add_once(url: str) -> bool:
+    """One-shot ingest a single URL. True on success; False (after logging) on failure."""
     try:
         path = pipeline.add_once(url)
     except FetchError as exc:
-        typer.echo(f"fetch failed: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
+        typer.echo(f"fetch failed for {url}: {exc}", err=True)
+        return False
     except ExtractionError as exc:
-        typer.echo(f"extraction failed: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
+        typer.echo(f"extraction failed for {url}: {exc}", err=True)
+        return False
     typer.echo(f"wrote {path}")
+    return True
 
 
-def _subscribe(url: str, name: str | None, output_dir: str | None) -> None:
+def _subscribe(url: str, name: str | None, output_dir: str | None) -> bool:
+    """Subscribe to a feed URL. Returns True on success, False (with logged error) on failure."""
     config = load_config()
 
     with build_client() as client:
@@ -134,7 +148,7 @@ def _subscribe(url: str, name: str | None, output_dir: str | None) -> None:
                 "  if this is a single article, try `pulp add <url> --once`.",
                 err=True,
             )
-            raise typer.Exit(code=1) from exc
+            return False
 
     if entry_count == 0:
         typer.echo(
@@ -142,7 +156,7 @@ def _subscribe(url: str, name: str | None, output_dir: str | None) -> None:
             "  if this is a single article, try `pulp add <url> --once`.",
             err=True,
         )
-        raise typer.Exit(code=1)
+        return False
 
     sub_name = name or _slug_from_title(feed_title or url)
     sub = Subscription(name=sub_name, source="rss", url=url, output_dir=output_dir)
@@ -154,10 +168,11 @@ def _subscribe(url: str, name: str | None, output_dir: str | None) -> None:
             f"{exc}.\n  use `pulp add <url> --name <other>` to pick a different name.",
             err=True,
         )
-        raise typer.Exit(code=1) from exc
+        return False
 
     save_config(new_config)
     typer.echo(f"subscribed to {sub_name!r} ({entry_count} items in feed)")
+    return True
 
 
 @app.command()
