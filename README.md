@@ -77,6 +77,29 @@ Four tabs:
 `tab` cycles tabs, `r` refreshes data, `q` quits. Adding a new view is one
 file in `src/pulpline/tui/views/` plus an entry in `views/__init__.VIEWS`.
 
+## Manga (MangaDex)
+
+```bash
+# Subscribe to a manga - new chapters land in `<output_dir>/<manga-slug>/` as CBZ
+pulp add https://mangadex.org/title/abc123-uuid/berserk
+
+# One-shot a single chapter
+pulp add https://mangadex.org/chapter/xyz-uuid
+```
+
+Pulpline talks to MangaDex's public API directly (no auth needed), pulls
+chapter images from MangaDex's at-home CDN, and zips them into CBZ files
+that Boox / KOReader / Calibre handle natively. Default language is English;
+the most recent 25 chapters are tracked per `pulp sync`.
+
+URLs on `mangadex.org` auto-route to the MangaDex source - no flag needed.
+The output is a `.cbz` (rather than `.epub` / `.pdf`) and ends up in the
+configured `output_dir` like every other source.
+
+**First-sync is heavy.** A subscribed manga's first sync downloads up to
+25 chapters × ~20 pages each. Expect tens of MB and a couple of minutes.
+Subsequent syncs only fetch new chapters.
+
 ## arXiv papers
 
 Pulpline ships an `arxiv` source that downloads the actual PDF instead of

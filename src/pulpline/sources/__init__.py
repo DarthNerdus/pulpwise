@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pulpline.sources.arxiv import ArXivSource
 from pulpline.sources.base import Source
+from pulpline.sources.mangadex import MangaDexSource
 from pulpline.sources.rss import RSSSource
 from pulpline.sources.substack import SubstackSource
 from pulpline.sources.url import URLSource
@@ -16,6 +17,7 @@ REGISTRY: dict[str, type[Source]] = {
     RSSSource.name: RSSSource,
     SubstackSource.name: SubstackSource,
     ArXivSource.name: ArXivSource,
+    MangaDexSource.name: MangaDexSource,
 }
 
 
@@ -30,6 +32,7 @@ def get_source(name: str) -> type[Source]:
 __all__ = [
     "REGISTRY",
     "ArXivSource",
+    "MangaDexSource",
     "RSSSource",
     "Source",
     "SubstackSource",
