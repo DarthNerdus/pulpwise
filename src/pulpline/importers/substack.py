@@ -13,6 +13,10 @@ from dataclasses import dataclass
 
 import httpx
 
+from pulpline.importers import parse_selection
+
+__all__ = ["SubstackPublication", "list_user_subscriptions", "parse_selection"]
+
 
 @dataclass(frozen=True, slots=True)
 class SubstackPublication:
@@ -67,35 +71,3 @@ def list_user_subscriptions(
         paid = isinstance(membership, str) and membership not in {"free_subscribed", ""}
         subs.append(SubstackPublication(name=pub_name, url=url, paid=paid))
     return subs
-
-
-def parse_selection(text: str, total: int) -> set[int]:
-    """Parse user range input like '1,3,5-7' or 'all' or 'none' into 1-based indices."""
-    s = text.strip().lower()
-    if not s or s == "none":
-        return set()
-    if s == "all":
-        return set(range(1, total + 1))
-
-    chosen: set[int] = set()
-    for part in s.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            lo_s, hi_s = part.split("-", 1)
-            try:
-                lo, hi = int(lo_s), int(hi_s)
-            except ValueError as exc:
-                raise ValueError(f"bad range fragment: {part!r}") from exc
-            if lo > hi:
-                lo, hi = hi, lo
-            chosen.update(i for i in range(lo, hi + 1) if 1 <= i <= total)
-        else:
-            try:
-                i = int(part)
-            except ValueError as exc:
-                raise ValueError(f"bad index: {part!r}") from exc
-            if 1 <= i <= total:
-                chosen.add(i)
-    return chosen

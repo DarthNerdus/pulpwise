@@ -23,10 +23,11 @@ from pulpline.config import (
     remove_subscription,
     save_config,
 )
+from pulpline.importers import parse_selection
+from pulpline.importers.opml import OpmlError, OpmlFeed, parse_opml
 from pulpline.importers.substack import (
     SubstackPublication,
     list_user_subscriptions,
-    parse_selection,
 )
 from pulpline.models import ExtractionError, FetchError
 from pulpline.state import connect, get_subscription_state, list_oneshots
@@ -367,6 +368,70 @@ def _slug_from_title(text: str) -> str:
     """Lowercased alphanumeric+hyphen slug suitable as a subscription name."""
     s = _SLUG_NON_ALNUM.sub("-", text.lower()).strip("-")
     return s or "feed"
+
+
+@import_app.command("opml")
+def import_opml(
+    file: Path = typer.Argument(
+        ..., help="Path to an OPML export from your feed reader / Substack / etc."
+    ),
+) -> None:
+    """Import feeds from an OPML file.
+
+    Works with exports from Reeder, NetNewsWire, Inoreader, Feedly, Substack,
+    and any other reader that emits OPML 2.0. Each feed becomes an `rss`
+    subscription; existing names are skipped.
+    """
+    try:
+        feeds = parse_opml(file)
+    except OpmlError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    selected = _prompt_select_opml(feeds)
+    if not selected:
+        typer.echo("nothing selected; nothing imported.")
+        return
+
+    config = load_config()
+    added = 0
+    skipped = 0
+    for feed in selected:
+        sub = Subscription(
+            name=_slug_from_title(feed.title),
+            source="rss",
+            url=feed.feed_url,
+        )
+        try:
+            config = add_subscription(config, sub)
+            added += 1
+        except ConfigError:
+            skipped += 1
+
+    save_config(config)
+    msg = f"imported {added} subscription(s)"
+    if skipped:
+        msg += f"; {skipped} skipped (name already exists)"
+    typer.echo(msg)
+
+
+def _prompt_select_opml(feeds: list[OpmlFeed]) -> list[OpmlFeed]:
+    typer.echo(f"\nfound {len(feeds)} feed(s):")
+    for i, feed in enumerate(feeds, start=1):
+        folder = f"  [{feed.folder}]" if feed.folder else ""
+        typer.echo(f"  [{i:>2}] {feed.title}{folder}\n       {feed.feed_url}")
+
+    raw = typer.prompt(
+        "\nwhich to import? (e.g. '1,3,5-7', 'all', or 'none')",
+        default="all",
+        show_default=True,
+    )
+    try:
+        indices = parse_selection(raw, len(feeds))
+    except ValueError as exc:
+        typer.echo(f"invalid selection: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    return [feeds[i - 1] for i in sorted(indices)]
 
 
 @import_app.command("substack")

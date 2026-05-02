@@ -51,6 +51,21 @@ pulp remove simon-willison-s-weblog
 
 `pulp add` auto-classifies each URL: real feeds get subscribed, single articles get one-shot. Use `--once` or `--feed` to override for the whole call. Errors on one URL do not abort the rest of the batch.
 
+## Bulk import from a feed reader (OPML)
+
+Most feed readers (Reeder, NetNewsWire, Inoreader, Feedly, ...) export
+your subscriptions as OPML. Pulpline reads that file directly:
+
+```bash
+pulp import opml ~/Downloads/subscriptions.opml
+# shows a numbered list of every feed in the file
+# pick which to import: 'all', 'none', or '1,3,5-7'
+```
+
+Existing subscription names are silently skipped, so re-importing the same
+file is safe. Folders/categories from the OPML are preserved as labels in
+the prompt but don't change pulpline's flat config.
+
 ## Substack with paid subscriptions
 
 Substack's public `/feed` URLs only carry free posts. To bring paid posts into

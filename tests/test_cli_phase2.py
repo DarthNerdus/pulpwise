@@ -270,6 +270,51 @@ def test_add_processes_multiple_urls_independently(
     assert "batch:" in result.output and "2 ok" in result.output
 
 
+def test_import_opml_writes_subscriptions(tmp_path: Path) -> None:
+    """Full OPML import flow end-to-end through the CLI."""
+    opml = tmp_path / "feeds.opml"
+    opml.write_text(
+        '<?xml version="1.0"?><opml version="2.0"><head/><body>'
+        '<outline text="One" xmlUrl="https://one.example/feed"/>'
+        '<outline text="Two" xmlUrl="https://two.example/feed"/>'
+        "</body></opml>",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["import", "opml", str(opml)], input="all\n")
+    assert result.exit_code == 0, result.output
+
+    subs = load_config().subscriptions
+    assert {s.url for s in subs} == {
+        "https://one.example/feed",
+        "https://two.example/feed",
+    }
+    assert all(s.source == "rss" for s in subs)
+
+
+def test_import_opml_partial_selection(tmp_path: Path) -> None:
+    opml = tmp_path / "feeds.opml"
+    opml.write_text(
+        '<?xml version="1.0"?><opml version="2.0"><head/><body>'
+        '<outline text="A" xmlUrl="https://a.example/feed"/>'
+        '<outline text="B" xmlUrl="https://b.example/feed"/>'
+        '<outline text="C" xmlUrl="https://c.example/feed"/>'
+        "</body></opml>",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["import", "opml", str(opml)], input="1,3\n")
+    assert result.exit_code == 0, result.output
+    urls = {s.url for s in load_config().subscriptions}
+    assert urls == {"https://a.example/feed", "https://c.example/feed"}
+
+
+def test_import_opml_missing_file_errors(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["import", "opml", str(tmp_path / "nope.opml")])
+    assert result.exit_code != 0
+    assert "not found" in (result.output + (result.stderr or "")).lower()
+
+
 def test_import_substack_writes_subs_and_auth(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
