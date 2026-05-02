@@ -5,9 +5,11 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 
 import feedparser
 import httpx
+import lxml.html
 import typer
 
 from pulpline import __version__, pipeline
@@ -107,10 +109,16 @@ def add(
     for url in urls:
         if once:
             ok = _add_once(url)
-        elif feed or _looks_like_feed(url):
+        elif feed:
             ok = _subscribe(url, name=name, output_dir=output_dir)
         else:
-            ok = _add_once(url)
+            resolved = _resolve_feed_url(url)
+            if resolved is not None:
+                if resolved != url:
+                    typer.echo(f"discovered feed: {resolved}")
+                ok = _subscribe(resolved, name=name, output_dir=output_dir)
+            else:
+                ok = _add_once(url)
         successes += int(ok)
         failures += int(not ok)
 
@@ -121,16 +129,74 @@ def add(
         raise typer.Exit(code=1)
 
 
-def _looks_like_feed(url: str) -> bool:
-    """Return True if `url` parses as a feed with at least one entry."""
+def _resolve_feed_url(url: str) -> str | None:
+    """Resolve a URL to the feed pulpline should subscribe to.
+
+    Returns:
+      - the input URL if it parses as a feed itself
+      - an autodiscovered alternate-feed URL if the input is a front-page
+        whose HTML advertises one via `<link rel="alternate"
+        type="application/rss+xml">` (the W3C autodiscovery standard)
+      - None if neither - caller falls through to one-shot.
+
+    Autodiscovery is restricted to front-pages (empty/root path, no query)
+    because article pages typically advertise their publication's feed too,
+    and we don't want `pulp add <article-url>` to accidentally subscribe.
+    """
     try:
         with build_client() as client:
             response = client.get(url)
             response.raise_for_status()
-            parsed = feedparser.parse(response.content)
-            return bool(parsed.entries)
     except httpx.HTTPError, ValueError:
-        return False
+        return None
+
+    if feedparser.parse(response.content).entries:
+        return url
+
+    if not _is_front_page(url):
+        return None
+
+    alt = _alternate_feed_url(response.text, url)
+    if alt is None:
+        return None
+
+    try:
+        with build_client() as client:
+            alt_response = client.get(alt)
+            alt_response.raise_for_status()
+    except httpx.HTTPError, ValueError:
+        return None
+
+    if feedparser.parse(alt_response.content).entries:
+        return alt
+    return None
+
+
+def _is_front_page(url: str) -> bool:
+    """True if URL has empty/root path and no query - looks like a publication front-page."""
+    parts = urlsplit(url)
+    return parts.path in ("", "/") and not parts.query
+
+
+def _alternate_feed_url(html: str, base_url: str) -> str | None:
+    """Find the first <link rel=alternate type=application/{rss,atom}+xml> href in HTML head."""
+    try:
+        tree = lxml.html.fromstring(html)
+    except ValueError, lxml.etree.ParserError:
+        return None
+
+    for link in tree.iter("link"):
+        rel = (link.get("rel") or "").lower()
+        type_ = (link.get("type") or "").lower()
+        href = link.get("href")
+        if (
+            "alternate" in rel
+            and type_ in {"application/rss+xml", "application/atom+xml"}
+            and isinstance(href, str)
+            and href
+        ):
+            return urljoin(base_url, href)
+    return None
 
 
 def _add_once(url: str) -> bool:

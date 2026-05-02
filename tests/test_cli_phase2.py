@@ -64,6 +64,92 @@ def test_add_with_explicit_name(
     assert config.subscriptions[0].name == "stratechery"
 
 
+def test_is_front_page_helper() -> None:
+    from pulpline.cli import _is_front_page
+
+    assert _is_front_page("https://etymology.substack.com")
+    assert _is_front_page("https://etymology.substack.com/")
+    assert not _is_front_page("https://etymology.substack.com/p/some-post")
+    assert not _is_front_page("https://etymology.substack.com/?p=42")
+
+
+def test_alternate_feed_url_helper() -> None:
+    from pulpline.cli import _alternate_feed_url
+
+    html = """<html><head>
+      <link rel="alternate" type="application/rss+xml" href="/feed">
+    </head><body>x</body></html>"""
+    assert (
+        _alternate_feed_url(html, "https://etymology.substack.com/")
+        == "https://etymology.substack.com/feed"
+    )
+
+    # Atom is acceptable too
+    html_atom = """<html><head>
+      <link rel="alternate" type="application/atom+xml" href="https://example.com/atom.xml">
+    </head></html>"""
+    assert _alternate_feed_url(html_atom, "https://example.com/") == "https://example.com/atom.xml"
+
+    # No alternate link
+    assert _alternate_feed_url("<html><head></head></html>", "https://x.com/") is None
+
+
+def test_add_autodiscovers_feed_from_front_page(
+    monkeypatch: pytest.MonkeyPatch, mock_client_factory: ClientFactory
+) -> None:
+    """`pulp add https://etymology.substack.com/` follows the alternate link to /feed."""
+    front = "https://etymology.substack.com/"
+    feed_url = "https://etymology.substack.com/feed"
+    front_html = (
+        "<html><head>"
+        f'<link rel="alternate" type="application/rss+xml" href="{feed_url}">'
+        "</head><body></body></html>"
+    )
+    _patch_build_client(monkeypatch, mock_client_factory, {front: front_html, feed_url: _feed()})
+
+    result = runner.invoke(app, ["add", front])
+    assert result.exit_code == 0, result.output
+    assert "discovered feed" in result.output
+    config = load_config()
+    assert len(config.subscriptions) == 1
+    assert config.subscriptions[0].url == feed_url
+
+
+def test_add_does_not_autodiscover_on_article_url(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_client_factory: ClientFactory,
+    tmp_path: Path,
+) -> None:
+    """A specific article URL with an alternate link must NOT subscribe to the feed."""
+    from pulpline import pipeline
+
+    article = "https://etymology.substack.com/p/some-post"
+    feed_url = "https://etymology.substack.com/feed"
+    article_html = (
+        "<html><head>"
+        f'<link rel="alternate" type="application/rss+xml" href="{feed_url}">'
+        "</head><body>article body</body></html>"
+    )
+    _patch_build_client(
+        monkeypatch, mock_client_factory, {article: article_html, feed_url: _feed()}
+    )
+
+    captured: list[str] = []
+
+    def fake_add_once(target: str, *args: object, **kwargs: object) -> Path:
+        captured.append(target)
+        out = tmp_path / "x.epub"
+        out.write_bytes(b"x")
+        return out
+
+    monkeypatch.setattr(pipeline, "add_once", fake_add_once)
+
+    result = runner.invoke(app, ["add", article])
+    assert result.exit_code == 0, result.output
+    assert captured == [article]  # one-shot, not subscribe
+    assert load_config().subscriptions == ()
+
+
 def test_add_dispatches_to_oneshot_when_not_a_feed(
     monkeypatch: pytest.MonkeyPatch,
     mock_client_factory: ClientFactory,
