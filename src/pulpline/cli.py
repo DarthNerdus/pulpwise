@@ -56,6 +56,11 @@ def add(
         "--once",
         help="Force one-shot fetch even for feeds; do not persist to config.",
     ),
+    feed: bool = typer.Option(
+        False,
+        "--feed",
+        help="Force subscribe path; skip feed-vs-article auto-detection.",
+    ),
     name: str | None = typer.Option(
         None,
         "--name",
@@ -68,12 +73,41 @@ def add(
         help="Per-subscription output directory override.",
     ),
 ) -> None:
-    """Add a subscription, or fetch a single article one-shot."""
+    """Add a subscription, or fetch a single article one-shot.
+
+    By default the URL is auto-classified - real feeds get subscribed, single
+    articles get one-shot. Use `--once` to force one-shot or `--feed` to force
+    subscribe when detection guesses wrong.
+    """
+    if once and feed:
+        typer.echo("--once and --feed are mutually exclusive.", err=True)
+        raise typer.Exit(code=2)
+
     if once:
         _add_once(url)
         return
+    if feed:
+        _subscribe(url, name=name, output_dir=output_dir)
+        return
 
-    _subscribe(url, name=name, output_dir=output_dir)
+    if _looks_like_feed(url):
+        _subscribe(url, name=name, output_dir=output_dir)
+    else:
+        _add_once(url)
+
+
+def _looks_like_feed(url: str) -> bool:
+    """Return True if `url` parses as a feed with at least one entry."""
+    try:
+        with build_client() as client:
+            response = client.get(url)
+            response.raise_for_status()
+            parsed = feedparser.parse(response.content)
+            return bool(parsed.entries)
+    except httpx.HTTPError, ValueError:
+        # Network or parse failure - fall back to one-shot. The actual fetch
+        # will surface a useful error to the user from there.
+        return False
 
 
 def _add_once(url: str) -> None:

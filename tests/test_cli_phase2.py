@@ -64,18 +64,79 @@ def test_add_with_explicit_name(
     assert config.subscriptions[0].name == "stratechery"
 
 
-def test_add_rejects_non_feed(
-    monkeypatch: pytest.MonkeyPatch, mock_client_factory: ClientFactory
+def test_add_dispatches_to_oneshot_when_not_a_feed(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_client_factory: ClientFactory,
+    tmp_path: Path,
 ) -> None:
+    """Auto-detection: article URLs go to one-shot, not subscribe."""
+    from pulpline import pipeline
+
     url = "https://example.com/article"
     _patch_build_client(
         monkeypatch, mock_client_factory, {url: "<html><body>Not a feed</body></html>"}
     )
 
+    captured: dict[str, object] = {}
+
+    def fake_add_once(target: str, *args: object, **kwargs: object) -> Path:
+        captured["url"] = target
+        out = tmp_path / "x.epub"
+        out.write_bytes(b"x")
+        return out
+
+    monkeypatch.setattr(pipeline, "add_once", fake_add_once)
+
     result = runner.invoke(app, ["add", url])
+    assert result.exit_code == 0, result.output
+    assert captured["url"] == url
+    # No subscription should have been written.
+    assert load_config().subscriptions == ()
+
+
+def test_add_with_feed_flag_forces_subscribe(
+    monkeypatch: pytest.MonkeyPatch, mock_client_factory: ClientFactory
+) -> None:
+    """`--feed` skips auto-detection and goes straight to the subscribe path."""
+    feed_url = "https://example.com/feed"
+    _patch_build_client(monkeypatch, mock_client_factory, {feed_url: _feed()})
+
+    result = runner.invoke(app, ["add", feed_url, "--feed", "--name", "forced"])
+    assert result.exit_code == 0, result.output
+    assert load_config().subscriptions[0].name == "forced"
+
+
+def test_add_with_once_flag_forces_oneshot_even_for_feeds(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_client_factory: ClientFactory,
+    tmp_path: Path,
+) -> None:
+    """`--once` overrides auto-detection - even a feed URL goes to one-shot."""
+    from pulpline import pipeline
+
+    feed_url = "https://example.com/feed"
+    _patch_build_client(monkeypatch, mock_client_factory, {feed_url: _feed()})
+
+    captured: dict[str, object] = {}
+
+    def fake_add_once(target: str, *args: object, **kwargs: object) -> Path:
+        captured["url"] = target
+        out = tmp_path / "x.epub"
+        out.write_bytes(b"x")
+        return out
+
+    monkeypatch.setattr(pipeline, "add_once", fake_add_once)
+
+    result = runner.invoke(app, ["add", feed_url, "--once"])
+    assert result.exit_code == 0
+    assert captured["url"] == feed_url
+    assert load_config().subscriptions == ()
+
+
+def test_add_rejects_once_and_feed_combined() -> None:
+    result = runner.invoke(app, ["add", "https://example.com/x", "--once", "--feed"])
     assert result.exit_code != 0
-    output = result.output + (result.stderr or "")
-    assert "feed" in output.lower()
+    assert "mutually exclusive" in (result.output + (result.stderr or "")).lower()
 
 
 def test_add_rejects_duplicate_name(
