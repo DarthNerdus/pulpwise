@@ -41,9 +41,14 @@ class Subscription:
     source: str
     url: str
     output_dir: str | None = None  # None means inherit from paths.output_dir
-    language: str | None = None  # source-specific (e.g. MangaDex chapter language)
-    max_chapters: int | None = None  # MangaDex: how many chapters to track. 0 = unlimited.
-    order: str | None = None  # MangaDex: "asc" (read-from-start) or "desc" (latest first).
+    # Per-subscription source-specific options (e.g. MangaDex `language`,
+    # `max_chapters`, `order`). The core never names individual keys -
+    # source plugins read whatever shape they need from this dict.
+    options: dict[str, str | int] = field(default_factory=dict)
+
+    def option(self, key: str) -> str | int | None:
+        """Read an option, returning None if unset. Convenience for source plugins."""
+        return self.options.get(key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,26 +221,32 @@ def _sub_from_dict(raw: dict[str, object], index: int) -> Subscription:
     if output_dir is not None and not isinstance(output_dir, str):
         raise ConfigError(f"subscriptions[{index}].output_dir must be a string")
 
-    language = raw.get("language")
-    if language is not None and not isinstance(language, str):
-        raise ConfigError(f"subscriptions[{index}].language must be a string")
+    options: dict[str, str | int] = {}
 
-    max_chapters = raw.get("max_chapters")
-    if max_chapters is not None and not isinstance(max_chapters, int):
-        raise ConfigError(f"subscriptions[{index}].max_chapters must be an integer")
+    # Legacy top-level fields from earlier versions of pulpline.
+    # On next save we'll rewrite them under [subscriptions.options].
+    for legacy_key in ("language", "max_chapters", "order"):
+        if legacy_key in raw:
+            value = raw[legacy_key]
+            if not isinstance(value, (str, int)):
+                raise ConfigError(f"subscriptions[{index}].{legacy_key} must be a string or int")
+            options[legacy_key] = value
 
-    order = raw.get("order")
-    if order is not None and order not in {"asc", "desc"}:
-        raise ConfigError(f"subscriptions[{index}].order must be 'asc' or 'desc', got {order!r}")
+    nested = raw.get("options")
+    if nested is not None:
+        if not isinstance(nested, dict):
+            raise ConfigError(f"subscriptions[{index}].options must be a table")
+        for k, v in nested.items():
+            if not isinstance(v, (str, int)):
+                raise ConfigError(f"subscriptions[{index}].options.{k} must be a string or int")
+            options[k] = v
 
     return Subscription(
         name=raw["name"],  # type: ignore[arg-type]
         source=raw["source"],  # type: ignore[arg-type]
         url=raw["url"],  # type: ignore[arg-type]
         output_dir=output_dir,
-        language=language,
-        max_chapters=max_chapters,
-        order=order,
+        options=options,
     )
 
 
@@ -243,10 +254,6 @@ def _sub_to_dict(sub: Subscription) -> dict[str, object]:
     out: dict[str, object] = {"name": sub.name, "source": sub.source, "url": sub.url}
     if sub.output_dir is not None:
         out["output_dir"] = sub.output_dir
-    if sub.language is not None:
-        out["language"] = sub.language
-    if sub.max_chapters is not None:
-        out["max_chapters"] = sub.max_chapters
-    if sub.order is not None:
-        out["order"] = sub.order
+    if sub.options:
+        out["options"] = dict(sub.options)
     return out

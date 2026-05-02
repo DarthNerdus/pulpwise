@@ -6,7 +6,7 @@ Local-first content pipeline for e-readers. Pulls articles, papers, newsletters,
 
 ## Status
 
-`0.1.0` (beta). The full command surface ships: `add`, `sync`, `list`, `remove`, `extend`, `migrate`, `import` (substack/opml), and an interactive `tui`. See [SPEC.md](SPEC.md) for the design and roadmap.
+`0.1.0` (beta). The full command surface ships: `add`, `sync`, `list`, `remove`, `migrate`, `import` (substack/opml), `mangadex` (add/extend), and an interactive `tui`. See [SPEC.md](SPEC.md) for the design and roadmap.
 
 ## Install
 
@@ -94,21 +94,25 @@ chapter images from MangaDex's at-home CDN, and zips them into CBZ files
 that Boox / KOReader / Calibre handle natively. Default language is English
 (`en`); the most recent 25 chapters per language are tracked per `pulp sync`.
 
-To pick a different translation language, pass `--language` (or `-l`) when
-subscribing - it accepts MangaDex's standard language codes (`ja`, `ru`,
-`es`, `fr`, `de`, `zh`, `ko`, `pt-br`, etc.):
+To pick a different translation language or chapter window, use the
+`pulp mangadex add` subcommand. It accepts `--language` (or `-l`) for any
+MangaDex language code (`ja`, `ru`, `es`, `fr`, `de`, `zh`, `ko`, `pt-br`,
+...) and `--max-chapters` to cap how many chapters are tracked:
 
 ```bash
-pulp add 'https://mangadex.org/title/.../berserk' --language ja
+pulp mangadex add 'https://mangadex.org/title/.../berserk' --language ja
 ```
 
-Or edit `~/.config/pulpline/config.toml` directly:
+Or edit `~/.config/pulpline/config.toml` directly. Source-specific knobs
+live under `[subscriptions.options]`:
 
 ```toml
 [[subscriptions]]
 name = "berserk"
 source = "mangadex"
 url = "https://mangadex.org/title/.../berserk"
+
+[subscriptions.options]
 language = "ja"
 ```
 
@@ -125,13 +129,13 @@ For long-running manga where you want to read from chapter 1, subscribe with
 `--from-start` (sets `order=asc`) and a small `--max-chapters`:
 
 ```bash
-pulp add 'https://mangadex.org/title/.../berserk' -l ru --from-start --max-chapters 10
-pulp sync                       # downloads chapters 1-10
+pulp mangadex add 'https://mangadex.org/title/.../berserk' -l ru --from-start --max-chapters 10
+pulp sync                                 # downloads chapters 1-10
 
 # read those, then bump
-pulp extend berserk --by 10     # chapters 11-20 next sync
-pulp extend berserk --to 50     # set absolute target
-pulp extend berserk --all       # remove the cap entirely (paginate to end)
+pulp mangadex extend berserk --by 10      # chapters 11-20 next sync
+pulp mangadex extend berserk --to 50      # set absolute target
+pulp mangadex extend berserk --all        # remove the cap entirely (paginate to end)
 ```
 
 The TUI Library view shows `name (downloaded/total)` for MangaDex
@@ -141,14 +145,14 @@ tells you at a glance how far you are.
 ### Default vs from-start
 
 ```bash
-# Default: latest 25 chapters, ongoing-feed style
-pulp add 'https://mangadex.org/title/.../berserk' -l ru
+# Default: latest 25 chapters, ongoing-feed style (same as `pulp add <url>`)
+pulp mangadex add 'https://mangadex.org/title/.../berserk' -l ru
 
 # Latest 100 chapters
-pulp add 'https://mangadex.org/title/.../berserk' -l ru --max-chapters 100
+pulp mangadex add 'https://mangadex.org/title/.../berserk' -l ru --max-chapters 100
 
 # All chapters (heavy: ~20 pages × N chapters of bandwidth)
-pulp add 'https://mangadex.org/title/.../berserk' -l ru --max-chapters 0
+pulp mangadex add 'https://mangadex.org/title/.../berserk' -l ru --max-chapters 0
 ```
 
 **First-sync is heavy.** A 25-chapter sync downloads ~tens of MB; an

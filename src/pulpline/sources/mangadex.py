@@ -79,16 +79,10 @@ class MangaDexSource(Source):
         subscription: Subscription | None = None,
     ) -> MangaDexSource:
         del cfg
-        language = _DEFAULT_LANGUAGE
-        max_chapters = _DEFAULT_MAX_CHAPTERS
-        order = _DEFAULT_ORDER
-        if subscription is not None:
-            if subscription.language:
-                language = subscription.language
-            if subscription.max_chapters is not None:
-                max_chapters = subscription.max_chapters
-            if subscription.order:
-                order = subscription.order
+        opts = subscription.options if subscription is not None else {}
+        language = _str_opt(opts.get("language"), _DEFAULT_LANGUAGE)
+        max_chapters = _int_opt(opts.get("max_chapters"), _DEFAULT_MAX_CHAPTERS)
+        order = _str_opt(opts.get("order"), _DEFAULT_ORDER)
         return cls(client=client, language=language, max_chapters=max_chapters, order=order)
 
     def discover(self, target_url: str) -> Iterable[ItemRef]:
@@ -307,6 +301,21 @@ def _chapter_label(cache: dict[str, Any]) -> str:
     if chapter_title:
         parts.append(str(chapter_title))
     return " - ".join(parts)
+
+
+def _str_opt(value: str | int | None, default: str) -> str:
+    return value if isinstance(value, str) and value else default
+
+
+def _int_opt(value: str | int | None, default: int) -> int:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default
 
 
 def _parse_iso(value: object) -> datetime | None:

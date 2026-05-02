@@ -233,7 +233,7 @@ def test_from_config_uses_subscription_language() -> None:
     from pulpline.config import Config, Subscription
 
     cfg = Config()
-    sub = Subscription(name="berserk", source="mangadex", url="x", language="ru")
+    sub = Subscription(name="berserk", source="mangadex", url="x", options={"language": "ru"})
     source = MangaDexSource.from_config(cfg, subscription=sub)
     assert source._language == "ru"
 

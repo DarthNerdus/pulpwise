@@ -46,6 +46,11 @@ app = typer.Typer(
 import_app = typer.Typer(help="Bulk-import subscriptions from external services.")
 app.add_typer(import_app, name="import")
 
+mangadex_app = typer.Typer(
+    help="MangaDex-specific subscription commands (chapter window, language)."
+)
+app.add_typer(mangadex_app, name="mangadex")
+
 
 def _version_callback(value: bool) -> None:
     if value:
@@ -95,31 +100,15 @@ def add(
         "--output-dir",
         help="Per-subscription output directory override.",
     ),
-    language: str | None = typer.Option(
-        None,
-        "--language",
-        "-l",
-        help="Source-specific language code (MangaDex: chapter translation language, e.g. 'ru').",
-    ),
-    max_chapters: int | None = typer.Option(
-        None,
-        "--max-chapters",
-        help="MangaDex: cap chapters tracked. 0 = unlimited (paginate to exhaustion).",
-    ),
-    from_start: bool = typer.Option(
-        False,
-        "--from-start",
-        help=(
-            "MangaDex: read from chapter 1 forward (sets order=asc; default "
-            "max-chapters=10 unless overridden)."
-        ),
-    ),
 ) -> None:
     """Add one or more URLs.
 
     Each URL is auto-classified independently: feeds are subscribed, single
     articles are one-shot. Use `--once` or `--feed` to override detection for
     every URL in the call. Errors on individual URLs do not abort the batch.
+
+    For source-specific options (MangaDex language, chapter window, etc.),
+    use `pulp mangadex add` (or the corresponding source subcommand).
     """
     if once and feed:
         typer.echo("--once and --feed are mutually exclusive.", err=True)
@@ -128,33 +117,15 @@ def add(
         typer.echo("--name only applies when adding a single URL.", err=True)
         raise typer.Exit(code=2)
 
-    order: str | None = "asc" if from_start else None
-    if from_start and max_chapters is None:
-        max_chapters = 10
-
     successes = 0
     failures = 0
     for url in urls:
         if once:
             ok = _add_once(url)
         elif feed:
-            ok = _subscribe(
-                url,
-                name=name,
-                output_dir=output_dir,
-                language=language,
-                max_chapters=max_chapters,
-                order=order,
-            )
+            ok = _subscribe(url, name=name, output_dir=output_dir)
         else:
-            ok = _auto_dispatch(
-                url,
-                name=name,
-                output_dir=output_dir,
-                language=language,
-                max_chapters=max_chapters,
-                order=order,
-            )
+            ok = _auto_dispatch(url, name=name, output_dir=output_dir)
         successes += int(ok)
         failures += int(not ok)
 
@@ -170,9 +141,7 @@ def _auto_dispatch(
     *,
     name: str | None,
     output_dir: str | None,
-    language: str | None,
-    max_chapters: int | None = None,
-    order: str | None = None,
+    options: dict[str, str | int] | None = None,
 ) -> bool:
     """Pick subscribe vs one-shot for a URL based on its claiming source.
 
@@ -184,14 +153,7 @@ def _auto_dispatch(
     source_cls = pick_source_for_url(url)
     if source_cls is not URLSource:
         if source_cls.is_subscribable(url):
-            return _subscribe(
-                url,
-                name=name,
-                output_dir=output_dir,
-                language=language,
-                max_chapters=max_chapters,
-                order=order,
-            )
+            return _subscribe(url, name=name, output_dir=output_dir, options=options)
         return _add_once(url)
 
     # Generic URL: feed-or-article via feedparser + RSS autodiscovery.
@@ -199,14 +161,7 @@ def _auto_dispatch(
     if resolved is not None:
         if resolved != url:
             typer.echo(f"discovered feed: {resolved}")
-        return _subscribe(
-            resolved,
-            name=name,
-            output_dir=output_dir,
-            language=language,
-            max_chapters=max_chapters,
-            order=order,
-        )
+        return _subscribe(resolved, name=name, output_dir=output_dir, options=options)
     return _add_once(url)
 
 
@@ -298,9 +253,7 @@ def _subscribe(
     url: str,
     name: str | None,
     output_dir: str | None,
-    language: str | None = None,
-    max_chapters: int | None = None,
-    order: str | None = None,
+    options: dict[str, str | int] | None = None,
 ) -> bool:
     """Subscribe to a URL. Returns True on success, False (with logged error) on failure."""
     config = load_config()
@@ -342,9 +295,7 @@ def _subscribe(
         source=source_name,
         url=url,
         output_dir=output_dir,
-        language=language,
-        max_chapters=max_chapters,
-        order=order,
+        options=dict(options or {}),
     )
 
     try:
@@ -534,8 +485,52 @@ def migrate(
         typer.echo(f"  orphaned (subscription removed): {report.orphaned}")
 
 
-@app.command()
-def extend(
+_MANGADEX_DEFAULT_MAX_CHAPTERS = 25
+
+
+@mangadex_app.command("add")
+def mangadex_add(
+    url: str = typer.Argument(..., help="MangaDex URL: title page or chapter."),
+    name: str | None = typer.Option(
+        None, "--name", "-n", help="Subscription name (default: derived from URL slug)."
+    ),
+    output_dir: str | None = typer.Option(
+        None, "--output-dir", help="Per-subscription output directory override."
+    ),
+    language: str | None = typer.Option(
+        None, "--language", "-l", help="Chapter translation language code (e.g. 'en', 'ru', 'ja')."
+    ),
+    max_chapters: int | None = typer.Option(
+        None, "--max-chapters", help="Cap chapters tracked. 0 = unlimited (paginate to exhaustion)."
+    ),
+    from_start: bool = typer.Option(
+        False,
+        "--from-start",
+        help="Read from chapter 1 forward (sets order=asc; defaults max-chapters=10).",
+    ),
+) -> None:
+    """Subscribe to a MangaDex title with the read-from-start / language knobs.
+
+    `pulp add <url>` works too and routes by URL, but uses defaults for these
+    options. This subcommand exists when you want to set them at subscribe time.
+    """
+    options: dict[str, str | int] = {}
+    if language:
+        options["language"] = language
+    if from_start:
+        options["order"] = "asc"
+        if max_chapters is None:
+            max_chapters = 10
+    if max_chapters is not None:
+        options["max_chapters"] = max_chapters
+
+    ok = _subscribe(url, name=name, output_dir=output_dir, options=options)
+    if not ok:
+        raise typer.Exit(code=1)
+
+
+@mangadex_app.command("extend")
+def mangadex_extend(
     name: str = typer.Argument(..., help="Subscription name."),
     by: int | None = typer.Option(None, "--by", help="Increment max_chapters by this many."),
     to: int | None = typer.Option(None, "--to", help="Set max_chapters to this absolute value."),
@@ -543,11 +538,11 @@ def extend(
         False, "--all", help="Remove the cap entirely (paginate to exhaustion)."
     ),
 ) -> None:
-    """Bump a subscription's `max_chapters` to fetch more chapters next sync.
+    """Bump a MangaDex subscription's chapter window to fetch more on the next sync.
 
-    Useful for read-from-start workflows: subscribe with `--from-start
-    --max-chapters 10`, read those, then `pulp extend <name> --by 10` to grab
-    the next batch on the next `pulp sync`.
+    Useful for read-from-start workflows: subscribe with `pulp mangadex add ...
+    --from-start --max-chapters 10`, read those, then `pulp mangadex extend
+    <name> --by 10` to grab the next batch.
     """
     flags_set = sum(x is not None for x in (by, to)) + int(all_)
     if flags_set != 1:
@@ -560,7 +555,8 @@ def extend(
         typer.echo(f"no subscription named {name!r}.", err=True)
         raise typer.Exit(code=1)
 
-    current = sub.max_chapters if sub.max_chapters is not None else 25  # default
+    current_raw = sub.option("max_chapters")
+    current = current_raw if isinstance(current_raw, int) else _MANGADEX_DEFAULT_MAX_CHAPTERS
     if all_:
         new_value = 0
     elif to is not None:
@@ -573,7 +569,9 @@ def extend(
         typer.echo("max_chapters cannot be negative.", err=True)
         raise typer.Exit(code=2)
 
-    new_sub = replace(sub, max_chapters=new_value)
+    new_options = dict(sub.options)
+    new_options["max_chapters"] = new_value
+    new_sub = replace(sub, options=new_options)
     new_subs = tuple(new_sub if s.name == name else s for s in config.subscriptions)
     save_config(replace(config, subscriptions=new_subs))
 
