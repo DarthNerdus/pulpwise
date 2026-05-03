@@ -6,7 +6,7 @@ Local-first content pipeline for e-readers. Pulls articles, papers, newsletters,
 
 ## Status
 
-`0.1.0` (beta). The full command surface ships: `add`, `sync`, `list`, `remove`, `migrate`, `import` (substack/opml), `mangadex` (add/extend), and an interactive `tui`. See [SPEC.md](SPEC.md) for the design and roadmap.
+`0.1.0` (beta). The full command surface ships: `add`, `sync`, `list`, `remove`, `migrate`, `import` (substack/opml), `mangadex` (add/extend), `search anna`, and an interactive `tui`. See [SPEC.md](SPEC.md) for the design and roadmap.
 
 ## Install
 
@@ -188,6 +188,55 @@ For URL formats, see arXiv's [API user manual](https://info.arxiv.org/help/api/u
 The `search_query` field accepts category codes (`cat:cs.AI`), authors
 (`au:lastname`), keyword search (`all:phrase`, `ti:title`, `abs:abstract`),
 and Boolean combinations.
+
+## Search Anna's Archive
+
+```bash
+pulp search anna "Designing Data-Intensive Applications"
+pulp search anna "DDIA" --ext epub --lang en --limit 10
+pulp search anna "transformers" --content paper
+```
+
+Pulpline shows a numbered list of hits with title, authors, year, language,
+format, and size. Pick a number to download; the file lands in
+`<output_dir>/oneshots/` and gets recorded in the items ledger so re-runs
+are deduped.
+
+Filters: `--content` (`book` default, `paper`, `comic`, `magazine`),
+`--ext` (`epub`, `pdf`, `mobi`, ...), `--lang` (ISO codes: `en`, `ru`,
+`ja`, ...), `--limit` (max results, default 20).
+
+### Why a donation key is required
+
+Anna's Archive funds itself through donations and offers a fast,
+CAPTCHA-free download API only to donors. Pulpline uses that API
+(`fast_download.json`) for every download - no CAPTCHA breaking, no
+mirror-roulette, no torrent fallback. **Get a key by donating at
+[annas-archive.li/donate](https://annas-archive.li/donate)**, then put it
+in your config (never in a git repo):
+
+```toml
+[auth.annas]
+api_key = "..."                              # required
+mirrors = ["li", "gl", "pk", "gd"]           # optional, default in code
+```
+
+Or set `PULPLINE_ANNAS_API_KEY` in the environment if you'd rather keep it
+out of files.
+
+Search itself does not need a key - it scrapes the same HTML the web UI
+serves, with a real browser User-Agent so DDoS-Guard doesn't 403 us. Anna
+[explicitly tells programmatic clients](https://annas-archive.li/llms.txt)
+that there's no search API even for donors and points at the multi-TB
+`aa_derived_mirror_metadata` torrent for offline indexing - which is not
+laptop-scale, so we accept the HTML path with the etiquette of running one
+query per user-typed command (no parallelism, no background scraping).
+
+URLs on `annas-archive.{li,gl,pk,gd}/md5/<hash>` also work directly: `pulp
+add https://annas-archive.li/md5/abc...` is a one-shot download. The
+`search` command is sugar that resolves a query to one of those URLs.
+
+You are responsible for legal compliance in your jurisdiction.
 
 ## Bulk import from a feed reader (OPML)
 

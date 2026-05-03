@@ -30,6 +30,7 @@ from pulpline.importers.substack import (
     list_user_subscriptions,
 )
 from pulpline.models import ExtractionError, FetchError
+from pulpline.searchers.base import SearchResult
 from pulpline.sources import REGISTRY as _SOURCE_REGISTRY
 from pulpline.sources import pick_source_for_url
 from pulpline.sources.rss import RSSSource
@@ -50,6 +51,9 @@ mangadex_app = typer.Typer(
     help="MangaDex-specific subscription commands (chapter window, language)."
 )
 app.add_typer(mangadex_app, name="mangadex")
+
+search_app = typer.Typer(help="Interactive search across libraries (Anna's Archive, ...).")
+app.add_typer(search_app, name="search")
 
 
 def _version_callback(value: bool) -> None:
@@ -577,6 +581,96 @@ def mangadex_extend(
 
     label = "unlimited" if new_value == 0 else str(new_value)
     typer.echo(f"{name}: max_chapters {current} -> {label}")
+
+
+@search_app.command("anna")
+def search_anna(
+    query: str = typer.Argument(..., help="Search terms (title, author, ISBN, ...)."),
+    content: str | None = typer.Option(
+        None,
+        "--content",
+        "-c",
+        help="Result type: book (default), paper, comic, magazine.",
+    ),
+    extension: str | None = typer.Option(
+        None, "--ext", help="Filter by file extension (epub, pdf, mobi, ...)."
+    ),
+    language: str | None = typer.Option(
+        None, "--lang", "-l", help="Filter by language code (en, ru, ja, ...)."
+    ),
+    limit: int = typer.Option(20, "--limit", help="Max results to show.", min=1, max=100),
+) -> None:
+    """Search Anna's Archive, pick a result, download it via the donation API.
+
+    Search uses HTML scraping with a browser User-Agent (Anna does not ship
+    a search API). Download uses the legitimate `fast_download.json`
+    endpoint and requires `[auth.annas].api_key` (set after donating).
+    """
+    from pulpline.searchers.annas import AnnaSearcher
+
+    config = load_config()
+    with AnnaSearcher() as searcher:
+        try:
+            results = list(
+                searcher.search(
+                    query,
+                    content=content,
+                    extension=extension,
+                    language=language,
+                    limit=limit,
+                )
+            )
+        except FetchError as exc:
+            typer.echo(f"search failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+    if not results:
+        typer.echo("no results.")
+        return
+
+    pick = _prompt_pick_search_result(results)
+    if pick is None:
+        typer.echo("nothing picked; nothing downloaded.")
+        return
+
+    typer.echo(f"downloading: {pick.title}")
+    try:
+        path = pipeline.add_once(pick.target_url, config=config)
+    except FetchError as exc:
+        typer.echo(f"download failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    except ExtractionError as exc:
+        typer.echo(f"download failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"wrote {path}")
+
+
+def _prompt_pick_search_result(results: list[SearchResult]) -> SearchResult | None:
+    """Render a numbered list of search hits and prompt for one (or 'none')."""
+    typer.echo(f"\nfound {len(results)} result(s):")
+    for i, r in enumerate(results, start=1):
+        meta_bits = [b for b in (r.year, r.language, r.extension, r.size) if b]
+        meta = "  -  " + " | ".join(meta_bits) if meta_bits else ""
+        author = f"  -  {r.authors}" if r.authors else ""
+        typer.echo(f"  [{i:>2}] {r.title}{author}{meta}")
+
+    raw = typer.prompt(
+        "\nwhich to download? (a number, or 'none')",
+        default="none",
+        show_default=True,
+    )
+    raw = raw.strip().lower()
+    if raw in ("none", "n", "0", ""):
+        return None
+    try:
+        idx = int(raw)
+    except ValueError:
+        typer.echo(f"invalid pick: {raw!r}", err=True)
+        raise typer.Exit(code=2) from None
+    if not 1 <= idx <= len(results):
+        typer.echo(f"pick out of range: {idx}", err=True)
+        raise typer.Exit(code=2)
+    return results[idx - 1]
 
 
 @app.command()

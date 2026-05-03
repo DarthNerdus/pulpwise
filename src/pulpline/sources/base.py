@@ -32,7 +32,7 @@ class Source(ABC):
     name: ClassVar[str]
     extension: ClassVar[str] = "epub"
     """File extension for items this source produces. Most sources emit EPUBs;
-    binary-format sources (arXiv → PDF, MangaDex → CBZ) override this."""
+    binary-format sources (arXiv -> PDF, MangaDex -> CBZ) override this."""
 
     def __init__(self, client: httpx.Client | None = None) -> None:
         self._client = client

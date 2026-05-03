@@ -74,12 +74,17 @@ def add_once(
     output_dir: Path | None = None,
     client: httpx.Client | None = None,
     state_path: Path | None = None,
+    config: Config | None = None,
 ) -> Path:
     """Fetch a single URL, render to its source's format, write to disk. Dedup-aware.
 
     The source is picked by URL pattern (`Source.matches_url`); URLSource is
     the fallback. So `arxiv.org/abs/...` routes to ArXivSource (PDF),
     everything else routes to URLSource (EPUB via trafilatura).
+
+    `config` is threaded into the source via `from_config` so config-aware
+    sources (Anna's Archive's API key) work on the one-shot path. Loaded
+    lazily from disk if not passed.
 
     If `url` has already been ingested, returns the existing path without
     re-fetching. Re-runs are idempotent.
@@ -89,13 +94,14 @@ def add_once(
     key = dedup_key(url)
 
     source_cls = pick_source_for_url(url)
+    cfg = config if config is not None else load_config()
 
     with connect(state_path) as conn:
         existing = is_seen(conn, key)
         if existing is not None:
             return Path(existing)
 
-        with source_cls(client=client) as source:
+        with source_cls.from_config(cfg, client=client) as source:
             refs = list(source.discover(url))
             if len(refs) != 1:
                 raise RuntimeError(
@@ -105,7 +111,7 @@ def add_once(
             content = source.render(article)
 
         sink = FilesystemSink(target)
-        path = sink.write(article, content, source_cls.extension)
+        path = sink.write(article, content, source.extension)
 
         record_item(
             conn,
@@ -205,7 +211,7 @@ def _sync_with_source(
             article = source.fetch(ref)
             article = replace(article, subscription_name=sub.name)
             content = source.render(article)
-            path = sink.write(article, content, type(source).extension)
+            path = sink.write(article, content, source.extension)
             record_item(
                 conn,
                 ItemRecord(

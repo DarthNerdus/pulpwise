@@ -211,7 +211,7 @@ A pulpline subscription today is one entry in `[[subscriptions]]`. Importers *po
 ### One-shot fetchers (new architectural shape)
 Not subscriptions; ad-hoc lookups. User invokes, picks a result, downloads once.
 
-- **`pulp search anna "<title> [author]"`** - query Anna's Archive, list candidates with size / format / quality, fetch the chosen one to `output_dir`. EPUB preferred, PDF acceptable. User is responsible for legal compliance in their jurisdiction. Item recorded in the items ledger so re-fetches are deduped.
+- ~~**`pulp search anna "<title> [author]"`**~~ - **shipped.** Implemented as a `searchers/` namespace parallel to `sources/`: `AnnaSearcher` does HTML scrape with a browser UA (Anna ships no search API even for donors per their `llms.txt`); `AnnaSource` does the actual download via the legitimate `fast_download.json` API with a donation key. Decision logged below.
 
 ### Renderers
 - **CBZ** for manga (driven by MangaDex)
@@ -235,7 +235,7 @@ Not subscriptions; ad-hoc lookups. User invokes, picks a result, downloads once.
 ## 6. Current State
 
 - **Last Updated:** 2026-05-03
-- **Status:** v0.1.0 (beta). Spec phases 0-3 complete; post-MVP roadmap items shipped: Substack source + bulk importer (cookie auth), arXiv (PDF passthrough), MangaDex (CBZ + read-from-start), OPML import, TUI (Library/Subscriptions/Sync/Stats), syncthing CLI integration, CLI progress bars during sync. GitHub Actions CI configured. PyPI publish staged but not yet executed.
+- **Status:** v0.1.0 (beta). Spec phases 0-3 complete; post-MVP roadmap items shipped: Substack source + bulk importer (cookie auth), arXiv (PDF passthrough), MangaDex (CBZ + read-from-start), OPML import, TUI (Library/Subscriptions/Sync/Stats), syncthing CLI integration, CLI progress bars during sync, Anna's Archive search + download (donation API). GitHub Actions CI configured. PyPI publish staged but not yet executed.
 - **Working directory:** `/Users/egorkonovalov/pulpline`
 
 ### Locked decisions (recorded so they don't get re-litigated)
@@ -247,6 +247,8 @@ Not subscriptions; ad-hoc lookups. User invokes, picks a result, downloads once.
 - Auto-detection of feed vs page in `pulp add`: implementation detail, not spec'd
 - Phase 1 deliverable: `pulp add <url> --once` only (no SQLite, no TOML); persistence in Phase 2
 - Substack import (post-MVP): append + interactive checklist for selection
+- Anna's Archive search backend: HTML scrape with a browser UA, not bulk-metadata torrent (28.9TB - not laptop-scale). Anna ships no search API even for donors per their `llms.txt`. Pulpline runs single-flight queries at human rate to stay within etiquette. Download uses the legitimate `fast_download.json` donation API.
+- Anna's Archive: split into `searchers/annas.py` (HTML scrape, no key) and `sources/annas.py` (donation API, key required). `searchers/` is a new namespace parallel to `sources/` because search is a one-shot interactive query, not a recurring feed - the Source ABC's `discover()` is for feeds, not query results.
 
 ### Known issues / Phase 3 inheritance
 - **Trafilatura's date extraction picks the first date it finds on a page** (was: Phase 2 inheritance). RSS source now uses `entry.published_parsed` from feedparser instead, so feed items get correct dates. URLSource (one-shot path) still inherits trafilatura's guess - acceptable because one-shot dates are advisory.
