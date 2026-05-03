@@ -84,6 +84,14 @@ def test_looks_like_block_detects_ddos_guard_interstitial() -> None:
     assert not _looks_like_block('<html><a href="/md5/abc">book</a> ddos-guard mention</html>')
 
 
+def test_looks_like_block_detects_parked_domain_redirect() -> None:
+    """`.li` was hijacked into a router.parklogic.com redirect; we treat that as a block."""
+    assert _looks_like_block(
+        "<html><head><title>Redirecting...</title></head><body>"
+        "<script>router.parklogic.com</script></body></html>"
+    )
+
+
 def _make_client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler))
 

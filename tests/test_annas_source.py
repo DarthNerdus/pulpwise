@@ -17,7 +17,7 @@ from pulpline.sources.annas import (
 )
 
 MD5 = "abcdef0123456789abcdef0123456789"
-TARGET_URL = f"https://annas-archive.li/md5/{MD5}"
+TARGET_URL = f"https://annas-archive.gl/md5/{MD5}"
 FAKE_KEY = "test-key-not-real"
 
 
@@ -36,12 +36,12 @@ def _routed_client(routes: dict[str, httpx.Response]) -> httpx.Client:
 def test_matches_url_accepts_md5_paths_on_known_mirrors() -> None:
     for tld in DEFAULT_MIRRORS:
         assert AnnaSource.matches_url(f"https://annas-archive.{tld}/md5/{MD5}")
-    assert AnnaSource.matches_url(f"https://annas-archive.li/md5/{MD5}/some-title")
+    assert AnnaSource.matches_url(f"https://annas-archive.gl/md5/{MD5}/some-title")
 
 
 def test_matches_url_rejects_non_md5_paths() -> None:
-    assert not AnnaSource.matches_url("https://annas-archive.li/search?q=foo")
-    assert not AnnaSource.matches_url("https://annas-archive.li/")
+    assert not AnnaSource.matches_url("https://annas-archive.gl/search?q=foo")
+    assert not AnnaSource.matches_url("https://annas-archive.gl/")
     assert not AnnaSource.matches_url("https://example.com/md5/abc")
 
 
@@ -67,6 +67,15 @@ def test_title_from_filename_strips_ext_and_decodes_underscores() -> None:
     assert _title_from_filename("paper.pdf") == "paper"
 
 
+def test_title_from_filename_decodes_percent_and_trims_at_anna_separator() -> None:
+    """Anna serves filenames like 'Sun%20and%20Steel%20--%20Yukio%20Mishima...epub'."""
+    raw = (
+        "Sun%20and%20Steel%20--%20Yukio%20Mishima%3B%20John%20Bester"
+        "%20--%201st%20trade%20paperback%20ed%2C%20Tokyo.epub"
+    )
+    assert _title_from_filename(raw) == "Sun and Steel"
+
+
 def test_redact_strips_api_key_from_messages() -> None:
     assert _redact(f"oops {FAKE_KEY} bad", FAKE_KEY) == "oops <redacted> bad"
     assert _redact("no key here", FAKE_KEY) == "no key here"
@@ -79,7 +88,7 @@ def test_fetch_without_api_key_raises_clear_error() -> None:
 
 
 def test_fetch_calls_fast_download_and_extracts_metadata() -> None:
-    api_url = "https://annas-archive.li/dyn/api/fast_download.json"
+    api_url = "https://annas-archive.gl/dyn/api/fast_download.json"
     download_url = "https://download.example/server/Designing_Data_Intensive_Applications.epub"
     routes = {api_url: httpx.Response(200, json={"download_url": download_url})}
 
@@ -93,7 +102,7 @@ def test_fetch_calls_fast_download_and_extracts_metadata() -> None:
 
 
 def test_render_downloads_bytes_from_cached_url() -> None:
-    api_url = "https://annas-archive.li/dyn/api/fast_download.json"
+    api_url = "https://annas-archive.gl/dyn/api/fast_download.json"
     download_url = "https://download.example/server/book.pdf"
     body = b"%PDF-1.4 fake bytes"
     routes = {
@@ -127,7 +136,7 @@ def test_fetch_falls_over_to_next_mirror_on_http_error() -> None:
 
 
 def test_fetch_surfaces_api_error_field_without_leaking_key() -> None:
-    api_url = "https://annas-archive.li/dyn/api/fast_download.json"
+    api_url = "https://annas-archive.gl/dyn/api/fast_download.json"
     routes = {api_url: httpx.Response(200, json={"error": "Quota exceeded today."})}
 
     with (

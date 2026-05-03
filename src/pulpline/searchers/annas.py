@@ -28,9 +28,11 @@ from pulpline.models import FetchError
 from pulpline.searchers.base import Searcher, SearchResult
 from pulpline.util.http import build_browser_client
 
-DEFAULT_MIRRORS = ("li", "gl", "pk", "gd")
-"""Working Anna's Archive domains as of 2026-05. SLUM (uptime monitor) is
-the source of truth long-term; this list is the ordered fallback."""
+DEFAULT_MIRRORS = ("gl", "pk", "gd")
+"""Working Anna's Archive domains as of 2026-05. `.li` is excluded - it's
+been hijacked and now serves a router.parklogic.com parked-domain page.
+SLUM (uptime monitor) is the source of truth long-term; this list is the
+ordered fallback."""
 
 _CONTENT_BOOK = "book_any"
 _CONTENT_PAPER = "journal"
@@ -124,7 +126,14 @@ def _looks_like_block(html: str) -> bool:
     lower = html.lower()
     return any(
         marker in lower
-        for marker in ("ddos-guard", "ddosguard", "cloudflare", "checking your browser")
+        for marker in (
+            "ddos-guard",
+            "ddosguard",
+            "cloudflare",
+            "checking your browser",
+            "parklogic",  # `.li` was hijacked into a parked-domain redirect
+            "redirecting...",
+        )
     )
 
 

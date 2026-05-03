@@ -218,7 +218,7 @@ in your config (never in a git repo):
 ```toml
 [auth.annas]
 api_key = "..."                              # required
-mirrors = ["li", "gl", "pk", "gd"]           # optional, default in code
+mirrors = ["gl", "pk", "gd"]                 # optional, default in code
 ```
 
 Or set `PULPLINE_ANNAS_API_KEY` in the environment if you'd rather keep it
@@ -232,8 +232,8 @@ that there's no search API even for donors and points at the multi-TB
 laptop-scale, so we accept the HTML path with the etiquette of running one
 query per user-typed command (no parallelism, no background scraping).
 
-URLs on `annas-archive.{li,gl,pk,gd}/md5/<hash>` also work directly: `pulp
-add https://annas-archive.li/md5/abc...` is a one-shot download. The
+URLs on `annas-archive.{gl,pk,gd}/md5/<hash>` also work directly: `pulp
+add https://annas-archive.gl/md5/abc...` is a one-shot download. The
 `search` command is sugar that resolves a query to one of those URLs.
 
 You are responsible for legal compliance in your jurisdiction.

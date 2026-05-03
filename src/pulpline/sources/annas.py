@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import urllib.parse
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar
 from urllib.parse import urlsplit
@@ -233,13 +234,17 @@ _EXTENSION_RX = re.compile(r"\.([A-Za-z0-9]{2,5})$")
 def _title_from_filename(filename: str) -> str | None:
     """Best-effort title from the filename Anna's CDN serves.
 
-    Strips the extension and replaces underscores with spaces. The pipeline
-    sanitizes the result again before writing, so we don't need to police
-    every weird character here.
+    Anna's download URLs carry filenames like
+    `Sun%20and%20Steel%20--%20Yukio%20Mishima%3B%20John%20Bester%20--%201st%20trade%20paperback...epub`
+    where ` -- ` separates title / author / edition / publisher / ISBN /
+    md5. We URL-decode, drop the extension, take everything before the
+    first ` -- `, and let `slugify_filename` police the rest at sink time.
     """
-    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
-    stem = stem.replace("_", " ").strip()
-    return stem or None
+    decoded = urllib.parse.unquote(filename)
+    stem = decoded.rsplit(".", 1)[0] if "." in decoded else decoded
+    head = stem.split(" -- ", 1)[0]
+    head = head.replace("_", " ").strip()
+    return head or None
 
 
 _KNOWN_EXTENSIONS = frozenset(
