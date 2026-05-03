@@ -10,6 +10,7 @@ from pulpline.models import FetchError, ItemRef
 from pulpline.searchers.annas import DEFAULT_MIRRORS
 from pulpline.sources.annas import (
     AnnaSource,
+    _author_from_filename,
     _extension_from_filename,
     _md5_from_url,
     _redact,
@@ -76,6 +77,18 @@ def test_title_from_filename_decodes_percent_and_trims_at_anna_separator() -> No
     assert _title_from_filename(raw) == "Sun and Steel"
 
 
+def test_author_from_filename_extracts_second_anna_field() -> None:
+    raw = (
+        "Sun%20and%20Steel%20--%20Yukio%20Mishima%3B%20John%20Bester"
+        "%20--%201st%20trade%20paperback%20ed.epub"
+    )
+    assert _author_from_filename(raw) == "Yukio Mishima; John Bester"
+
+
+def test_author_from_filename_none_when_only_title() -> None:
+    assert _author_from_filename("just_a_title.epub") is None
+
+
 def test_redact_strips_api_key_from_messages() -> None:
     assert _redact(f"oops {FAKE_KEY} bad", FAKE_KEY) == "oops <redacted> bad"
     assert _redact("no key here", FAKE_KEY) == "no key here"
@@ -96,9 +109,25 @@ def test_fetch_calls_fast_download_and_extracts_metadata() -> None:
         article = source.fetch(ItemRef(url=TARGET_URL))
 
     assert article.title == "Designing Data Intensive Applications"
+    assert article.author is None
     assert article.canonical_url == TARGET_URL
     assert article.publisher == "Anna's Archive"
     assert source.extension == "epub"
+
+
+def test_fetch_combines_title_and_author_from_anna_filename() -> None:
+    api_url = "https://annas-archive.gl/dyn/api/fast_download.json"
+    download_url = (
+        "https://download.example/server/"
+        "Sun%20and%20Steel%20--%20Yukio%20Mishima%20--%202003%20--%20Kodansha.epub"
+    )
+    routes = {api_url: httpx.Response(200, json={"download_url": download_url})}
+
+    with AnnaSource(client=_routed_client(routes), api_key=FAKE_KEY) as source:
+        article = source.fetch(ItemRef(url=TARGET_URL))
+
+    assert article.title == "Sun and Steel - Yukio Mishima"
+    assert article.author == "Yukio Mishima"
 
 
 def test_render_downloads_bytes_from_cached_url() -> None:

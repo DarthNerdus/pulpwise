@@ -121,17 +121,25 @@ class AnnaSource(Source):
         download_url, filename = self._request_download_url(md5)
         self._download_cache[md5] = (download_url, filename)
 
-        title = _title_from_filename(filename) if filename else md5
+        title_part, author = _split_anna_filename(filename) if filename else (None, None)
         if filename:
             ext = _extension_from_filename(filename)
             if ext:
                 self._extension = ext
 
+        if title_part and author:
+            display_title = f"{title_part} - {author}"
+        elif title_part:
+            display_title = title_part
+        else:
+            display_title = md5
+
         return RawArticle(
-            title=title or md5,
+            title=display_title,
             body_html="",
             canonical_url=ref.url,
             source_url=ref.url,
+            author=author,
             publisher="Anna's Archive",
         )
 
@@ -240,11 +248,26 @@ def _title_from_filename(filename: str) -> str | None:
     md5. We URL-decode, drop the extension, take everything before the
     first ` -- `, and let `slugify_filename` police the rest at sink time.
     """
+    return _split_anna_filename(filename)[0]
+
+
+def _author_from_filename(filename: str) -> str | None:
+    """Best-effort author from Anna's CDN filename (the second `--`-separated chunk)."""
+    return _split_anna_filename(filename)[1]
+
+
+def _split_anna_filename(filename: str) -> tuple[str | None, str | None]:
+    """Return (title, author) extracted from Anna's CDN filename.
+
+    Both elements are optional - some filenames have only a title, some
+    are weirder shapes we don't want to misparse.
+    """
     decoded = urllib.parse.unquote(filename)
     stem = decoded.rsplit(".", 1)[0] if "." in decoded else decoded
-    head = stem.split(" -- ", 1)[0]
-    head = head.replace("_", " ").strip()
-    return head or None
+    parts = [p.replace("_", " ").strip() for p in stem.split(" -- ")]
+    title = parts[0] if parts and parts[0] else None
+    author = parts[1] if len(parts) > 1 and parts[1] else None
+    return title, author
 
 
 _KNOWN_EXTENSIONS = frozenset(
