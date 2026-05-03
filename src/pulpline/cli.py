@@ -634,6 +634,8 @@ def search_anna(
         typer.echo("nothing picked; nothing downloaded.")
         return
 
+    from pulpline.sources.annas import AnnaSource
+
     failures = 0
     for idx in picked_indices:
         pick = results[idx]
@@ -645,6 +647,12 @@ def search_anna(
             failures += 1
             continue
         typer.echo(f"  wrote {path}")
+        quota = AnnaSource.LAST_QUOTA_INFO
+        if quota is not None:
+            typer.echo(
+                f"  quota: {quota.downloads_left}/{quota.downloads_per_day} "
+                f"fast downloads remaining today"
+            )
 
     if failures:
         raise typer.Exit(code=1)

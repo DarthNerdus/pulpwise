@@ -18,6 +18,7 @@ import os
 import re
 import urllib.parse
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 from urllib.parse import urlsplit
 
@@ -35,8 +36,30 @@ _API_PATH = "/dyn/api/fast_download.json"
 _ENV_KEY = "PULPLINE_ANNAS_API_KEY"
 
 
+@dataclass(frozen=True, slots=True)
+class AnnaQuotaInfo:
+    """Membership download quota, parsed from `account_fast_download_info`.
+
+    Anna populates this on every successful `fast_download.json` response.
+    `recently_downloaded_md5s` is the list of MD5s already counted today;
+    re-downloading any of them is free (doesn't decrement `downloads_left`).
+    """
+
+    downloads_left: int
+    downloads_per_day: int
+    downloads_done_today: int
+    recently_downloaded_md5s: tuple[str, ...]
+
+
 class AnnaSource(Source):
     name: ClassVar[str] = "annas"
+
+    # Class-level shared state: the most recent quota snapshot from any
+    # AnnaSource instance. The CLI reads this after pipeline.add_once()
+    # closes the source, since add_once owns the source lifecycle and
+    # there's no clean way to thread the snapshot back through its
+    # signature without changing every caller.
+    LAST_QUOTA_INFO: ClassVar[AnnaQuotaInfo | None] = None
 
     def __init__(
         self,
@@ -197,6 +220,13 @@ class AnnaSource(Source):
                 # key value back; surface only the API's own message.
                 raise FetchError(f"Anna API error: {error_msg}")
 
+            # Always capture quota info even on error responses: Anna
+            # populates `account_fast_download_info` whenever the key is
+            # valid, including 'no md5 found' cases that we'd raise above.
+            quota = _parse_quota(payload.get("account_fast_download_info"))
+            if quota is not None:
+                AnnaSource.LAST_QUOTA_INFO = quota
+
             url = payload.get("download_url")
             if not isinstance(url, str) or not url:
                 last_error = ExtractionError(
@@ -292,3 +322,28 @@ def _redact(exc: object, api_key: str | None) -> str:
     if api_key:
         text = text.replace(api_key, "<redacted>")
     return text
+
+
+def _parse_quota(raw: object) -> AnnaQuotaInfo | None:
+    """Best-effort parse of Anna's `account_fast_download_info` block.
+
+    Returns None if the shape doesn't match - we'd rather hide quota than
+    surface a wrong number. Anna's keys have been stable for years but
+    this stays defensive.
+    """
+    if not isinstance(raw, dict):
+        return None
+    try:
+        left = int(raw["downloads_left"])
+        per_day = int(raw["downloads_per_day"])
+        done = int(raw.get("downloads_done_today", per_day - left))
+    except KeyError, TypeError, ValueError:
+        return None
+    recent_raw = raw.get("recently_downloaded_md5s") or []
+    recent = tuple(m for m in recent_raw if isinstance(m, str))
+    return AnnaQuotaInfo(
+        downloads_left=left,
+        downloads_per_day=per_day,
+        downloads_done_today=done,
+        recently_downloaded_md5s=recent,
+    )

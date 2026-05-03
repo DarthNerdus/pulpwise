@@ -9,10 +9,12 @@ from pulpline.config import Config
 from pulpline.models import FetchError, ItemRef
 from pulpline.searchers.annas import DEFAULT_MIRRORS
 from pulpline.sources.annas import (
+    AnnaQuotaInfo,
     AnnaSource,
     _author_from_filename,
     _extension_from_filename,
     _md5_from_url,
+    _parse_quota,
     _redact,
     _title_from_filename,
 )
@@ -194,6 +196,56 @@ def test_from_config_reads_api_key_and_mirrors() -> None:
     source = AnnaSource.from_config(cfg)
     assert source._api_key == FAKE_KEY
     assert source._mirrors == ("gl", "pk")
+
+
+def test_parse_quota_extracts_membership_fields() -> None:
+    raw = {
+        "downloads_left": 23,
+        "downloads_per_day": 25,
+        "downloads_done_today": 2,
+        "recently_downloaded_md5s": ["aaa", "bbb"],
+    }
+    quota = _parse_quota(raw)
+    assert quota == AnnaQuotaInfo(
+        downloads_left=23,
+        downloads_per_day=25,
+        downloads_done_today=2,
+        recently_downloaded_md5s=("aaa", "bbb"),
+    )
+
+
+def test_parse_quota_returns_none_on_bad_shape() -> None:
+    assert _parse_quota(None) is None
+    assert _parse_quota("not a dict") is None
+    assert _parse_quota({}) is None
+    assert _parse_quota({"downloads_left": "twenty-three"}) is None
+
+
+def test_fetch_records_quota_info_on_class_attr() -> None:
+    """fast_download.json's quota block lands on AnnaSource.LAST_QUOTA_INFO."""
+    AnnaSource.LAST_QUOTA_INFO = None  # reset shared state
+    api_url = "https://annas-archive.gl/dyn/api/fast_download.json"
+    routes = {
+        api_url: httpx.Response(
+            200,
+            json={
+                "download_url": "https://download.example/server/book.epub",
+                "account_fast_download_info": {
+                    "downloads_left": 22,
+                    "downloads_per_day": 25,
+                    "downloads_done_today": 3,
+                    "recently_downloaded_md5s": ["abc"],
+                },
+            },
+        )
+    }
+    with AnnaSource(client=_routed_client(routes), api_key=FAKE_KEY) as source:
+        source.fetch(ItemRef(url=TARGET_URL))
+
+    quota: AnnaQuotaInfo | None = AnnaSource.LAST_QUOTA_INFO
+    assert quota is not None
+    assert quota.downloads_left == 22
+    assert quota.downloads_per_day == 25
 
 
 def test_from_config_falls_back_to_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
