@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -13,11 +14,23 @@ from pulpline.models import ExtractionError, FetchError
 
 runner = CliRunner()
 
+_ANSI_RX = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _help_text(output: str) -> str:
+    """Normalize Rich-formatted typer help so substring asserts work in CI.
+
+    On narrow CI terminals, Rich wraps option names across lines with ANSI
+    color codes between characters, so '--once' can appear as
+    '--\x1b[0m\nonce' and a literal `in` check fails. This collapses both.
+    """
+    return _ANSI_RX.sub("", output).replace("\n", " ")
+
 
 def test_help_exits_zero_and_mentions_purpose() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "Local-first content pipeline" in result.output
+    assert "Local-first content pipeline" in _help_text(result.output)
 
 
 def test_version_flag() -> None:
@@ -29,7 +42,7 @@ def test_version_flag() -> None:
 def test_add_help_lists_once_flag() -> None:
     result = runner.invoke(app, ["add", "--help"])
     assert result.exit_code == 0
-    assert "--once" in result.output
+    assert "--once" in _help_text(result.output)
 
 
 def test_add_once_invokes_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
