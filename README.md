@@ -69,6 +69,11 @@ Four tabs:
 - **Subscriptions**: name / source / item count / last sync / status / URL,
   with the last error surfaced for any failing feed. `d` removes the
   highlighted subscription (config-only - already-written EPUBs stay).
+- **Search**: type a query, hit `enter`, browse Anna's Archive results
+  inline. `space` toggles a row, `a` toggles all, `d` downloads picked
+  rows (or the cursor row if none picked). Quota left and per-download
+  status surface in the line below the table. Same backend as
+  `pulp search anna` from the CLI.
 - **Sync**: pulpline ingestion status (per-subscription last sync + error)
   on top, syncthing delivery status below (devices online, folders, daemon
   version). When syncthing isn't installed, the lower section says so and
