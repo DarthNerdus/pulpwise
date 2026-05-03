@@ -28,6 +28,10 @@ def _isolated_pulpline_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("PULPLINE_STATE_PATH", str(tmp_path / "state.db"))
     monkeypatch.setenv("PULPLINE_CONFIG_PATH", str(tmp_path / "config.toml"))
     monkeypatch.setenv("PULPLINE_OUTPUT_DIR", str(tmp_path / "out"))
+    # CliRunner-driven tests go through _main, which calls setup_logging at
+    # the default XDG path. Point that at tmp_path too so test runs don't
+    # leak entries into the developer's real ~/.local/state/pulpline/log/.
+    monkeypatch.setenv("PULPLINE_LOG_DIR", str(tmp_path / "logs"))
 
 
 @pytest.fixture

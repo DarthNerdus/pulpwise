@@ -24,6 +24,9 @@ from pulpline.state import (
     was_ingested,
 )
 from pulpline.util.dedup import dedup_key
+from pulpline.util.logging import get_logger
+
+_log = get_logger("pipeline")
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,9 +99,12 @@ def add_once(
     source_cls = pick_source_for_url(url)
     cfg = config if config is not None else load_config()
 
+    _log.info("add_once start url=%s source=%s", url, source_cls.name)
+
     with connect(state_path) as conn:
         existing = is_seen(conn, key)
         if existing is not None:
+            _log.info("add_once dedup-hit url=%s path=%s", url, existing)
             return Path(existing)
 
         with source_cls.from_config(cfg, client=client) as source:
@@ -125,6 +131,7 @@ def add_once(
                 output_path=str(path),
             ),
         )
+        _log.info("add_once wrote url=%s path=%s", url, path)
         return path
 
 
@@ -157,9 +164,11 @@ def _sync_subscription(
     client: httpx.Client | None,
     progress: ProgressReporter | None,
 ) -> SyncReport:
+    _log.info("sync %s starting (source=%s url=%s)", sub.name, sub.source, sub.url)
     try:
         source_cls = get_source(sub.source)
     except ValueError as exc:
+        _log.error("sync %s unknown source: %s", sub.name, exc)
         update_subscription_state(conn, sub.name, "error", str(exc))
         report = SyncReport(sub.name, 0, 0, 1, (str(exc),))
         if progress is not None:
@@ -170,8 +179,17 @@ def _sync_subscription(
         with source_cls.from_config(cfg, client=client, subscription=sub) as source:
             report = _sync_with_source(sub, cfg, conn, source, progress)
     except (FetchError, ExtractionError) as exc:
+        _log.error("sync %s aborted: %s", sub.name, exc)
         update_subscription_state(conn, sub.name, "error", str(exc))
         report = SyncReport(sub.name, 0, 0, 1, (str(exc),))
+
+    _log.info(
+        "sync %s done: new=%d skipped=%d errors=%d",
+        sub.name,
+        report.new_items,
+        report.skipped,
+        report.errors,
+    )
 
     if progress is not None:
         progress.subscription_finished(sub.name, report)
@@ -226,6 +244,7 @@ def _sync_with_source(
             )
             new_items += 1
         except (FetchError, ExtractionError) as exc:
+            _log.warning("sync %s item failed url=%s err=%s", sub.name, ref.url, exc)
             errors += 1
             error_msgs.append(f"{ref.url}: {exc}")
         if progress is not None:

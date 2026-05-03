@@ -374,6 +374,13 @@ Linux (cron):
 
 systemd users can write a simple `.timer` unit pointing at `pulp sync`.
 
+Cron and launchd often capture stderr into mail or `/dev/null`; pulpline
+writes a durable log to `~/.local/state/pulpline/log/pulpline.log`
+(rotated at 1 MB, 5 backups) so you can postmortem failed syncs without
+relying on the scheduler's stderr handling. Override the directory with
+`PULPLINE_LOG_DIR=/path/to/log/dir`. Use `pulp -v <cmd>` to mirror
+DEBUG-level logs to stderr in real time.
+
 ## How it gets to the reader
 
 pulpline writes EPUBs to a folder; getting them onto the device is your problem. The intended pairing is [Syncthing](https://syncthing.net/) - it syncs `~/Sync/Pulpline` to a folder on the device, and Boox / Kindle / Kobo readers index whatever shows up. Other paths work too: USB drag-and-drop, Send-to-Kindle, BooxDrop, etc.

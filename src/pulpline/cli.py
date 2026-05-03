@@ -71,8 +71,17 @@ def _main(
         is_eager=True,
         help="Show version and exit.",
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Mirror logs to stderr at DEBUG level (logs always go to file).",
+    ),
 ) -> None:
     """Local-first content pipeline for e-readers."""
+    from pulpline.util.logging import setup_logging
+
+    setup_logging(verbose=verbose)
 
 
 @app.command()
