@@ -218,11 +218,18 @@ in your config (never in a git repo):
 ```toml
 [auth.annas]
 api_key = "..."                              # required
-mirrors = ["gl", "pk", "gd"]                 # optional, default in code
+mirrors = ["gl", "pk", "gd"]                 # optional; if unset, pulpline asks SLUM
 ```
 
 Or set `PULPLINE_ANNAS_API_KEY` in the environment if you'd rather keep it
 out of files.
+
+When `[auth.annas].mirrors` is unset, pulpline queries [SLUM](https://open-slum.org/)
+(the Shadow Library Uptime Monitor) on first use to learn which mirrors
+are currently up, and caches the answer at `~/.cache/pulpline/slum.json`
+for 24h. So when a domain rotates, pulpline notices within a day rather
+than failing silently. SLUM going down falls back to the same hardcoded
+list as the example above.
 
 Search itself does not need a key - it scrapes the same HTML the web UI
 serves, with a real browser User-Agent so DDoS-Guard doesn't 403 us. Anna

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 from urllib.parse import quote_plus, urljoin
 
 import httpx
@@ -27,6 +27,9 @@ import lxml.html
 from pulpline.models import FetchError
 from pulpline.searchers.base import Searcher, SearchResult
 from pulpline.util.http import build_browser_client
+
+if TYPE_CHECKING:
+    from pulpline.config import Config
 
 DEFAULT_MIRRORS = ("gl", "pk", "gd")
 """Working Anna's Archive domains as of 2026-05. `.li` is excluded - it's
@@ -56,6 +59,19 @@ class AnnaSearcher(Searcher):
 
     def _build_client(self) -> httpx.Client:
         return build_browser_client()
+
+    @classmethod
+    def from_config(
+        cls,
+        cfg: Config,
+        client: httpx.Client | None = None,
+    ) -> AnnaSearcher:
+        from pulpline.searchers.slum import discover_anna_mirrors, split_mirrors
+
+        auth = cfg.auth_for("annas")
+        mirrors_raw = auth.get("mirrors")
+        mirrors = tuple(split_mirrors(mirrors_raw)) if mirrors_raw else discover_anna_mirrors()
+        return cls(client=client, mirrors=mirrors)
 
     def search(
         self,

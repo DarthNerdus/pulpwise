@@ -617,7 +617,7 @@ def search_anna(
     from pulpline.searchers.annas import AnnaSearcher
 
     config = load_config()
-    with AnnaSearcher() as searcher:
+    with AnnaSearcher.from_config(config) as searcher:
         try:
             results = list(
                 searcher.search(

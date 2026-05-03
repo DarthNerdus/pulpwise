@@ -32,6 +32,10 @@ def _isolated_pulpline_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     # the default XDG path. Point that at tmp_path too so test runs don't
     # leak entries into the developer's real ~/.local/state/pulpline/log/.
     monkeypatch.setenv("PULPLINE_LOG_DIR", str(tmp_path / "logs"))
+    # SLUM cache lives at ~/.cache/pulpline/slum.json by default; route
+    # tests at tmp_path so cache writes during a search test don't shadow
+    # the user's real cache (and don't bleed across test runs).
+    monkeypatch.setenv("PULPLINE_CACHE_DIR", str(tmp_path / "cache"))
 
 
 @pytest.fixture

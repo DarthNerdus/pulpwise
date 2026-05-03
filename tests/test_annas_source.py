@@ -198,6 +198,22 @@ def test_from_config_reads_api_key_and_mirrors() -> None:
     assert source._mirrors == ("gl", "pk")
 
 
+def test_from_config_without_mirrors_consults_slum(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When no [auth.annas].mirrors override, SLUM discovery runs."""
+    called: dict[str, int] = {"n": 0}
+
+    def fake_discover(*args: object, **kwargs: object) -> tuple[str, ...]:
+        called["n"] += 1
+        return ("vg", "pk")  # arbitrary - just verify the wire-up
+
+    monkeypatch.setattr("pulpline.sources.annas.discover_anna_mirrors", fake_discover)
+
+    cfg = Config(auth={"annas": {"api_key": FAKE_KEY}})  # no mirrors override
+    source = AnnaSource.from_config(cfg)
+    assert called["n"] == 1
+    assert source._mirrors == ("vg", "pk")
+
+
 def test_parse_quota_extracts_membership_fields() -> None:
     raw = {
         "downloads_left": 23,

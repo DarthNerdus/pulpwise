@@ -26,6 +26,7 @@ import httpx
 
 from pulpline.models import ExtractionError, FetchError, ItemRef, RawArticle
 from pulpline.searchers.annas import DEFAULT_MIRRORS
+from pulpline.searchers.slum import discover_anna_mirrors, split_mirrors
 from pulpline.sources.base import Source
 
 if TYPE_CHECKING:
@@ -120,7 +121,10 @@ class AnnaSource(Source):
         auth = cfg.auth_for("annas")
         api_key = os.environ.get(_ENV_KEY) or auth.get("api_key") or None
         mirrors_raw = auth.get("mirrors")
-        mirrors = tuple(_split_mirrors(mirrors_raw)) if mirrors_raw else DEFAULT_MIRRORS
+        # No explicit override -> ask SLUM. discover_anna_mirrors falls
+        # back to the hardcoded set on any failure, so we never end up
+        # with zero mirrors here.
+        mirrors = tuple(split_mirrors(mirrors_raw)) if mirrors_raw else discover_anna_mirrors()
         return cls(client=client, api_key=api_key, mirrors=mirrors)
 
     def discover(self, target_url: str) -> Iterable[ItemRef]:
@@ -252,10 +256,6 @@ def _md5_from_url(url: str) -> str:
     if not match:
         raise ExtractionError(f"not an Anna md5 URL: {url}")
     return match.group(1).lower()
-
-
-def _split_mirrors(raw: str) -> list[str]:
-    return [p.strip().lstrip(".") for p in raw.replace(",", " ").split() if p.strip()]
 
 
 def _filename_from_url(url: str) -> str | None:
