@@ -786,49 +786,104 @@ def _prompt_select_opml(feeds: list[OpmlFeed]) -> list[OpmlFeed]:
 
 @import_app.command("substack")
 def import_substack(
-    username: str = typer.Argument(..., help="Your Substack handle (e.g. 'egorkonovalov')."),
-    cookies: Path = typer.Option(
-        ...,
+    username: str | None = typer.Argument(
+        None,
+        help="Your Substack handle. Defaults to [auth.substack].username if set.",
+    ),
+    cookies: Path | None = typer.Option(
+        None,
         "--cookies",
-        help="Path to a cookies.json from your logged-in browser session.",
+        help="Path to cookies.json. Defaults to [auth.substack].cookies_path if set.",
+    ),
+    auto: bool = typer.Option(
+        False,
+        "--auto",
+        "-y",
+        help="Skip the picker; auto-add every Substack you follow that isn't "
+        "already a pulpline subscription. For cron-driven 'pick up new follows' runs.",
     ),
 ) -> None:
-    """Import all of your Substack subscriptions in one shot.
+    """Import your Substack subscriptions.
 
-    Reads your session cookies, fetches the publications you follow, presents
-    a numeric selection prompt, and writes the chosen ones into config.toml
-    as `source = "substack"` subscriptions. Future `pulp sync` runs will use
-    those cookies to access paid content.
+    Reads your session cookies, fetches the publications you follow, and writes
+    them into config.toml as `source = "substack"` subscriptions. Interactive
+    by default; pass `--auto` to skip the picker and add every new follow.
+
+    First run: pass `<username> --cookies <path>` (everything gets persisted to
+    [auth.substack]). Later runs (or cron): just `pulp import substack --auto`.
     """
+    config = load_config()
+    auth = config.auth_for("substack")
+
+    resolved_username = username or auth.get("username")
+    if not resolved_username:
+        typer.echo(
+            "no username given and [auth.substack].username not set in config.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    cookies_path = cookies or (
+        Path(auth["cookies_path"]).expanduser() if auth.get("cookies_path") else None
+    )
+    if cookies_path is None:
+        typer.echo(
+            "no cookies path given and [auth.substack].cookies_path not set in config.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
     try:
-        cookie_dict = load_cookies(cookies)
+        cookie_dict = load_cookies(cookies_path)
     except AuthError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
 
     with build_client() as client:
         try:
-            pubs = list_user_subscriptions(username, cookie_dict, client)
+            pubs = list_user_subscriptions(resolved_username, cookie_dict, client)
         except httpx.HTTPError as exc:
-            typer.echo(f"failed to fetch subscriptions for {username!r}: {exc}", err=True)
+            typer.echo(
+                f"failed to fetch subscriptions for {resolved_username!r}: {exc}",
+                err=True,
+            )
             raise typer.Exit(code=1) from exc
 
     if not pubs:
         typer.echo(
-            f"no subscriptions found for {username!r}. is the handle correct, "
+            f"no subscriptions found for {resolved_username!r}. is the handle correct, "
             "and were the cookies exported from a logged-in session?",
             err=True,
         )
         raise typer.Exit(code=1)
 
-    chosen = _prompt_select(pubs)
-    if not chosen:
-        typer.echo("nothing selected; nothing imported.")
-        return
+    # Drop pubs already present (matched by URL or hostname so we don't duplicate
+    # whatever the user added manually as `rss` or otherwise).
+    existing_hosts = {urlsplit(s.url).hostname for s in config.subscriptions}
+    new_pubs = [p for p in pubs if urlsplit(p.url).hostname not in existing_hosts]
 
-    config = load_config()
+    if auto:
+        chosen = new_pubs
+        if not chosen:
+            typer.echo(f"all {len(pubs)} substacks already in config; nothing to add.")
+            _persist_substack_auth(config, resolved_username, cookies_path)
+            return
+    else:
+        if not new_pubs:
+            typer.echo(f"all {len(pubs)} substacks already in config; nothing to add.")
+            _persist_substack_auth(config, resolved_username, cookies_path)
+            return
+        chosen = _prompt_select(new_pubs)
+        if not chosen:
+            typer.echo("nothing selected; nothing imported.")
+            _persist_substack_auth(config, resolved_username, cookies_path)
+            return
+
     new_auth = dict(config.auth)
-    new_auth["substack"] = {"cookies_path": str(cookies)}
+    new_auth["substack"] = {
+        "cookies_path": str(cookies_path),
+        "username": resolved_username,
+    }
     new_config = replace(config, auth=new_auth)
 
     added = 0
@@ -847,6 +902,19 @@ def import_substack(
     if skipped:
         msg += f"; {skipped} skipped (name already exists)"
     typer.echo(msg)
+
+
+def _persist_substack_auth(config: Config, username: str, cookies_path: Path) -> None:
+    """Update [auth.substack] in config so future runs can be zero-arg."""
+    auth = config.auth_for("substack")
+    if auth.get("username") == username and auth.get("cookies_path") == str(cookies_path):
+        return
+    new_auth = dict(config.auth)
+    new_auth["substack"] = {
+        "cookies_path": str(cookies_path),
+        "username": username,
+    }
+    save_config(replace(config, auth=new_auth))
 
 
 def _prompt_select(pubs: list[SubstackPublication]) -> list[SubstackPublication]:
