@@ -3,6 +3,12 @@
 Where the generic `rss` source pulls public-only content via /feed, this one
 talks to Substack's archive + post endpoints directly. Reading paid content
 requires session cookies (configured globally in `[auth.substack].cookies_path`).
+
+Two source variants live here:
+  * `SubstackSource` - per-publication archive, indexed by site URL.
+  * `SubstackSavedSource` - the user's "saved for later" list across every
+    publication, indexed by `https://substack.com/inbox/saved`. Inherits
+    SubstackSource's auth + fetch logic; only the discover endpoint differs.
 """
 
 from __future__ import annotations
@@ -25,6 +31,10 @@ if TYPE_CHECKING:
 # Substack archive paginates; we list the most recent N. Re-running sync is
 # cheap (dedup) so we don't paginate exhaustively in v0.2.
 _DISCOVER_LIMIT = 25
+
+_SAVED_HOSTS = {"substack.com", "www.substack.com"}
+_SAVED_PATH = "/inbox/saved"
+_SAVED_API = "https://substack.com/api/v1/posts/saved"
 
 
 class SubstackSource(Source):
@@ -78,18 +88,7 @@ class SubstackSource(Source):
         if not isinstance(posts, list):
             raise ExtractionError(f"archive {endpoint} returned non-list")
 
-        for post in posts:
-            if not isinstance(post, dict):
-                continue
-            url = post.get("canonical_url")
-            if not isinstance(url, str) or not url:
-                continue
-            yield ItemRef(
-                url=url,
-                title=post.get("title") if isinstance(post.get("title"), str) else None,
-                pub_date=_parse_iso(post.get("post_date")),
-                guid=str(post["id"]) if post.get("id") is not None else None,
-            )
+        yield from _yield_post_refs(posts)
 
     def fetch(self, ref: ItemRef) -> RawArticle:
         base = _base_from_url(ref.url)
@@ -124,6 +123,101 @@ class SubstackSource(Source):
             publisher=_publication_name(data) or _hostname(base),
             pub_date=_parse_iso(data.get("post_date")),
             language="en",
+        )
+
+
+class SubstackSavedSource(SubstackSource):
+    """Source for the user's "saved for later" Substack posts.
+
+    Subscribe by adding `https://substack.com/inbox/saved` - one
+    subscription gives you everything you've saved across publications,
+    growing as you save more. Each post is fetched via the parent class's
+    logic, so paywalled saves work the same way they do for the
+    per-publication source: same `[auth.substack].cookies_path` covers both.
+    """
+
+    name: ClassVar[str] = "substack-saved"
+
+    @classmethod
+    def matches_url(cls, url: str) -> bool:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+        path = parts.path.rstrip("/")
+        return host in _SAVED_HOSTS and path == _SAVED_PATH
+
+    @classmethod
+    def is_subscribable(cls, url: str) -> bool:
+        del url
+        return True
+
+    @classmethod
+    def default_subscription_name(cls, url: str) -> str:
+        del url
+        return "substack-saves"
+
+    def discover(self, target_url: str) -> Iterable[ItemRef]:
+        self._publication_url = target_url.rstrip("/")
+        if not self._cookies:
+            raise FetchError(
+                "Substack saved-posts requires login cookies. "
+                "Set [auth.substack].cookies_path in config (export from your "
+                "logged-in browser session)."
+            )
+        try:
+            response = self.client.get(_SAVED_API, params={"limit": str(_DISCOVER_LIMIT)})
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise FetchError(f"failed to list saved posts: {exc}") from exc
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ExtractionError("saved-posts endpoint did not return JSON") from exc
+
+        # Substack's reverse-engineered shape: usually a flat list of post
+        # objects, but some reader endpoints wrap them under `posts` /
+        # `items` / `results`. Accept any of those before failing.
+        posts = _unwrap_post_list(payload)
+        if posts is None:
+            raise ExtractionError(
+                f"saved-posts endpoint returned unexpected shape: {type(payload).__name__}"
+            )
+
+        yield from _yield_post_refs(posts)
+
+
+def _unwrap_post_list(payload: object) -> list[Any] | None:
+    """Coerce a saves-API response into a list of post dicts."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("posts", "items", "results", "saved_posts"):
+            inner = payload.get(key)
+            if isinstance(inner, list):
+                return inner
+    return None
+
+
+def _yield_post_refs(posts: list[Any]) -> Iterable[ItemRef]:
+    """Yield ItemRefs from a list of Substack post objects.
+
+    Some saves endpoints nest the post under a per-entry wrapper key
+    (`{post: {...}}`); look one level deep before giving up on a row.
+    """
+    for entry in posts:
+        if not isinstance(entry, dict):
+            continue
+        post = entry
+        if "canonical_url" not in post and isinstance(entry.get("post"), dict):
+            post = entry["post"]
+        url = post.get("canonical_url")
+        if not isinstance(url, str) or not url:
+            continue
+        yield ItemRef(
+            url=url,
+            title=post.get("title") if isinstance(post.get("title"), str) else None,
+            pub_date=_parse_iso(post.get("post_date")),
+            guid=str(post["id"]) if post.get("id") is not None else None,
         )
 
 

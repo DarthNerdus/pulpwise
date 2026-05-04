@@ -296,6 +296,25 @@ Cookies expire after a few weeks; when they do, re-export and update the
 Cookie files contain session credentials - treat them like passwords. They
 sit in `~/.config/pulpline/` by convention, which is `chmod 600`-able.
 
+### Saved-for-later posts
+
+Substack lets you "save for later" while scrolling - that's a per-account
+list across publications, not a feed. Pulpline picks it up as a single
+subscription:
+
+```bash
+pulp add https://substack.com/inbox/saved
+```
+
+The next `pulp sync` (and every one after) fetches every newly-saved
+post as an EPUB. Same `[auth.substack].cookies_path` covers it - if
+`pulp import substack` already wrote that, you're done. If not, save
+your cookies first and add a `[auth.substack]` block to `config.toml`.
+
+Re-running with no new saves is a no-op (deduped via the items ledger).
+Re-saving a post you already ingested is also a no-op for the same
+reason.
+
 ## File organization + deletion
 
 Pulpline lays out items in subfolders under your `output_dir`:
