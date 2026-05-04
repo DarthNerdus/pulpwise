@@ -9,7 +9,7 @@ from textual.binding import BindingType
 from textual.widgets import Footer, Header, TabbedContent, TabPane
 
 from pulpline import __version__
-from pulpline.tui.views import VIEWS, View
+from pulpline.tui.views import VIEWS, SyncView, View
 
 
 class PulplineApp(App[None]):
@@ -19,6 +19,7 @@ class PulplineApp(App[None]):
     BINDINGS: ClassVar[list[BindingType]] = [
         ("q", "quit", "Quit"),
         ("r", "refresh_views", "Refresh"),
+        ("s", "sync_now", "Sync"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -32,6 +33,17 @@ class PulplineApp(App[None]):
     def action_refresh_views(self) -> None:
         for view in self.query(View):
             view.refresh_data()
+
+    def action_sync_now(self) -> None:
+        """Switch to the Sync tab and kick off a sync.
+
+        Lifted to the app level (rather than a SyncView binding) because
+        SyncView has no focusable widget, so view-level keybindings never
+        dispatch. App-level also means 's' works from any tab.
+        """
+        tabbed = self.query_one(TabbedContent)
+        tabbed.active = SyncView.ID
+        self.query_one(SyncView).action_run_sync()
 
 
 def run() -> None:
