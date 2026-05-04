@@ -11,7 +11,7 @@ from typing import Protocol
 import httpx
 
 from pulpline.config import Config, Subscription, default_output_dir, load_config
-from pulpline.models import ExtractionError, FetchError
+from pulpline.models import ExtractionError, FetchError, Paywalled
 from pulpline.sinks.filesystem import FilesystemSink
 from pulpline.sources import get_source, pick_source_for_url
 from pulpline.sources.base import Source
@@ -30,12 +30,22 @@ _log = get_logger("pipeline")
 
 
 @dataclass(frozen=True, slots=True)
+class PaywalledItem:
+    """One paywalled URL grouped under its host so the CLI can render
+    a single 'fix your cookies for X' hint per host."""
+
+    url: str
+    host: str
+
+
+@dataclass(frozen=True, slots=True)
 class SyncReport:
     name: str
     new_items: int
     skipped: int
     errors: int
     error_messages: tuple[str, ...] = ()
+    paywalled: tuple[PaywalledItem, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +63,10 @@ class SyncTotal:
     @property
     def total_errors(self) -> int:
         return sum(r.errors for r in self.reports)
+
+    @property
+    def total_paywalled(self) -> int:
+        return sum(len(r.paywalled) for r in self.reports)
 
 
 class ProgressReporter(Protocol):
@@ -214,6 +228,7 @@ def _sync_with_source(
     skipped = 0
     errors = 0
     error_msgs: list[str] = []
+    paywalled_items: list[PaywalledItem] = []
 
     for ref in refs:
         key = dedup_key(ref.url)
@@ -243,6 +258,9 @@ def _sync_with_source(
                 ),
             )
             new_items += 1
+        except Paywalled as exc:
+            _log.info("sync %s paywalled url=%s host=%s", sub.name, ref.url, exc.host)
+            paywalled_items.append(PaywalledItem(url=ref.url, host=exc.host))
         except (FetchError, ExtractionError) as exc:
             _log.warning("sync %s item failed url=%s err=%s", sub.name, ref.url, exc)
             errors += 1
@@ -250,6 +268,9 @@ def _sync_with_source(
         if progress is not None:
             progress.item_finished(sub.name)
 
+    # Paywalled items are a setup issue (cookies not exporting), not a
+    # subscription-level error worth marking the row red. Treat them
+    # as an "ok" sync with a separate visible bucket in the CLI.
     status = "ok" if errors == 0 else "error"
     error_summary = "; ".join(error_msgs) if error_msgs else None
     update_subscription_state(
@@ -259,7 +280,9 @@ def _sync_with_source(
         error_summary,
         total_items=source.last_known_total,
     )
-    return SyncReport(sub.name, new_items, skipped, errors, tuple(error_msgs))
+    return SyncReport(
+        sub.name, new_items, skipped, errors, tuple(error_msgs), tuple(paywalled_items)
+    )
 
 
 @dataclass(frozen=True, slots=True)

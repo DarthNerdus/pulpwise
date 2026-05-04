@@ -18,6 +18,20 @@ class FetchError(PulplineError):
     """Raised when an HTTP fetch fails or returns a non-success status."""
 
 
+class Paywalled(ExtractionError):  # noqa: N818 - "Error" suffix would be redundant + uglier
+    """A specific kind of ExtractionError: post is paid + auth didn't work.
+
+    Carries `host` so the orchestrator can group affected items by domain
+    and surface a single setup hint per host instead of repeating it once
+    per item. Subclassing ExtractionError keeps backwards-compatible
+    catches; new code can branch on this type to bucket separately.
+    """
+
+    def __init__(self, message: str, host: str) -> None:
+        super().__init__(message)
+        self.host = host
+
+
 @dataclass(frozen=True, slots=True)
 class ItemRef:
     """Lightweight reference to an item, produced by `Source.discover`.

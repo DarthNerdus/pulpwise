@@ -266,6 +266,12 @@ def test_fetch_records_quota_info_on_class_attr() -> None:
 
 def test_from_config_falls_back_to_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PULPLINE_ANNAS_API_KEY", "env-key-not-real")
+    # Stub SLUM so we don't make a real network call (which is flaky and
+    # makes this test sensitive to wall-clock timing under coverage).
+    monkeypatch.setattr(
+        "pulpline.sources.annas.discover_anna_mirrors",
+        lambda *a, **kw: DEFAULT_MIRRORS,
+    )
     cfg = Config()  # no auth
     source = AnnaSource.from_config(cfg)
     assert source._api_key == "env-key-not-real"

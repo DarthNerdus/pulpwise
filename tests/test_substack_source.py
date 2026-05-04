@@ -92,14 +92,24 @@ def test_fetch_returns_rawarticle_for_public_post() -> None:
     assert article.pub_date.year == 2026
 
 
-def test_fetch_paywalled_without_cookies_raises_with_clear_message() -> None:
+def test_fetch_paywalled_without_cookies_raises_paywalled_with_host() -> None:
+    """Empty body + audience=only_paid + no cookies -> Paywalled with host attached.
+
+    The orchestrator buckets these separately from generic errors so the
+    CLI can render a single 'fix your cookies for X' hint per host.
+    """
+    from pulpline.models import Paywalled
+
     base = "https://samkriss.substack.com"
     client = _routed_client({f"{base}/api/v1/posts/post-one": _post_payload(paywalled=True)})
     with (
         SubstackSource(client=client) as source,
-        pytest.raises(ExtractionError, match="paywalled"),
+        pytest.raises(Paywalled) as exc_info,
     ):
         source.fetch(ItemRef(url=f"{base}/p/post-one"))
+    # Paywalled subclasses ExtractionError so existing catches keep working.
+    assert isinstance(exc_info.value, ExtractionError)
+    assert exc_info.value.host == "samkriss.substack.com"
 
 
 def test_from_config_loads_cookies_when_configured(tmp_path: Any) -> None:

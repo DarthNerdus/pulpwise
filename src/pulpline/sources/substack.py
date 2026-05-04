@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from pulpline.auth import CookieEntry, load_cookies_with_domain
-from pulpline.models import ExtractionError, FetchError, ItemRef, RawArticle
+from pulpline.models import ExtractionError, FetchError, ItemRef, Paywalled, RawArticle
 from pulpline.sources.base import Source
 
 if TYPE_CHECKING:
@@ -128,23 +128,22 @@ class SubstackSource(Source):
         if not body_html:
             audience = data.get("audience")
             if audience == "only_paid":
+                host = _hostname(ref.url)
                 if not self._cookies:
-                    raise ExtractionError(
-                        f"{ref.url} is paywalled; configure [auth.substack].cookies_path"
+                    raise Paywalled(
+                        "no cookies configured (set [auth.substack].cookies_path)",
+                        host=host,
                     )
                 # Cookies are present but the body still came back empty.
                 # Most common cause: this publication runs on a custom
                 # domain (ACX on astralcodexten.com etc.) and the user's
                 # cookies only cover *.substack.com.
-                host = _hostname(ref.url)
                 if not host.endswith(".substack.com"):
-                    raise ExtractionError(
-                        f"{ref.url} is paywalled; the cookies in "
-                        "[auth.substack].cookies_path don't authenticate "
-                        f"against {host} (custom domain). Export this site's "
-                        "cookies separately and add the file to "
-                        "[auth.substack].extra_cookies_paths."
+                    raise Paywalled(
+                        f"cookies don't authenticate against {host} (custom domain)",
+                        host=host,
                     )
+                raise Paywalled("body empty even with cookies attached", host=host)
             raise ExtractionError(f"post {ref.url} has empty body_html")
 
         return RawArticle(

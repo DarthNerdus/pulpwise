@@ -336,24 +336,64 @@ def sync() -> None:
     with _CliProgress() as reporter:
         total = pipeline.sync(config=config, progress=reporter)
 
-    for report in total.reports:
-        if report.errors == 0:
-            typer.echo(f"  [{report.name}] {report.new_items} new, {report.skipped} skipped")
-        else:
-            typer.echo(
-                f"  [{report.name}] {report.new_items} new, "
-                f"{report.skipped} skipped, {report.errors} error(s)"
-            )
-            for msg in report.error_messages:
-                typer.echo(f"    {msg}")
-
-    typer.echo(
-        f"total: {total.total_new} new, {total.total_skipped} skipped, "
-        f"{total.total_errors} error(s)"
-    )
+    _print_sync_summary(total)
 
     if total.total_errors:
         raise typer.Exit(code=1)
+
+
+def _print_sync_summary(total: pipeline.SyncTotal) -> None:
+    """Compact, grouped post-sync summary.
+
+    Skips silent rows (nothing new + no errors), groups paywalled items
+    by host (so the "fix your cookies for X" hint is stated once per
+    host, not once per item), and groups generic errors by subscription.
+    """
+    from rich.console import Console
+
+    console = Console()
+    n_subs = len(total.reports)
+
+    # Per-sub one-liners, only for rows that produced something.
+    for r in total.reports:
+        bits: list[str] = []
+        if r.new_items:
+            bits.append(f"[green]+{r.new_items} new[/]")
+        if r.errors:
+            bits.append(f"[red]{r.errors} error(s)[/]")
+        if r.paywalled:
+            bits.append(f"[yellow]{len(r.paywalled)} paywalled[/]")
+        if not bits:
+            continue
+        console.print(f"  {' · '.join(bits)} on [b]{r.name}[/]")
+
+    # Totals line.
+    pieces: list[str] = []
+    if total.total_new:
+        pieces.append(f"[green]+{total.total_new} new[/]")
+    else:
+        pieces.append("[dim]+0 new[/]")
+    if total.total_paywalled:
+        pieces.append(f"[yellow]{total.total_paywalled} paywalled[/]")
+    if total.total_errors:
+        pieces.append(f"[red]{total.total_errors} error(s)[/]")
+    sub_word = "sub" if n_subs == 1 else "subs"
+    pieces.append(f"[dim]across {n_subs} {sub_word}[/]")
+    console.print(" · ".join(pieces))
+
+    # Paywalled detail intentionally elided. The per-sub one-liner
+    # ("4 paywalled on astral-codex-ten") names what + where; the user
+    # already knows the fix is to export that host's cookies. Logs at
+    # INFO level still record each paywalled URL for postmortems.
+
+    # Generic errors grouped by subscription (already-narrow lists, so
+    # fine to repeat the full message verbatim).
+    for r in total.reports:
+        if not r.error_messages:
+            continue
+        console.print(f"\n[red]✗[/] [b]{r.name}[/] - {len(r.error_messages)} error(s)")
+        for msg in r.error_messages:
+            console.print(f"     [dim]•[/] {msg}")
 
 
 class _CliProgress:

@@ -570,6 +570,5 @@ def test_sync_invokes_pipeline_and_summarizes(monkeypatch: pytest.MonkeyPatch) -
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 0, result.output
     assert "alpha" in result.output
-    assert "2 new" in result.output
-    assert "1 skipped" in result.output
-    assert "total: 2 new" in result.output
+    assert "+2 new" in result.output  # appears both per-sub and in totals
+    assert "1 sub" in result.output  # totals line names the subscription count
