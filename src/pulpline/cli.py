@@ -476,14 +476,40 @@ def tui() -> None:
 @app.command()
 def migrate(
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview moves without touching disk."),
+    rebuild: bool = typer.Option(
+        False,
+        "--rebuild",
+        help="Also re-fetch and re-render every item to pick up renderer "
+        "changes (image embedding, filename format, ...). Cheap moves run "
+        "first; the slow re-render runs after.",
+    ),
+    name: str | None = typer.Option(
+        None,
+        "--name",
+        "-n",
+        help="With --rebuild, scope to a single subscription instead of all.",
+    ),
 ) -> None:
-    """Reorganize existing items into per-subscription subfolders.
+    """Apply this version of pulp to already-ingested items.
 
-    Older pulpline versions wrote every item directly under `paths.output_dir`.
-    This command walks the items table and moves each file to its new
-    subscription-named subfolder (or `oneshots/` for one-shots). Run once
-    after upgrading; idempotent and safe to re-run.
+    Two phases, cheapest first:
+
+      1. Move each item file into its current canonical layout
+         (per-subscription subfolders, `oneshots/` for one-shots). This
+         is the original `migrate` behavior - cheap, idempotent.
+
+      2. With `--rebuild`, also re-fetch the item from its source and
+         re-render with the current renderer. Use this after an upgrade
+         that changes how files are produced (e.g. image embedding in
+         EPUBs, title format). Costs a network fetch per item plus any
+         image downloads. Item-level failures skip + log + continue.
+
+    `--name <sub>` scopes the rebuild phase to one subscription.
     """
+    if name is not None and not rebuild:
+        typer.echo("--name only applies with --rebuild.", err=True)
+        raise typer.Exit(code=2)
+
     report = pipeline.migrate(dry_run=dry_run)
     label = "would move" if dry_run else "moved"
     typer.echo(f"{label}: {report.moved} file(s)")
@@ -495,6 +521,82 @@ def migrate(
         typer.echo(f"  files missing on disk: {report.missing_on_disk}")
     if report.orphaned:
         typer.echo(f"  orphaned (subscription removed): {report.orphaned}")
+
+    if rebuild and not dry_run:
+        _rebuild_items(name=name)
+    elif rebuild and dry_run:
+        typer.echo("(--rebuild ignored under --dry-run)")
+
+
+def _rebuild_items(name: str | None) -> None:
+    """Re-fetch + re-render every item in `name` (or all subscriptions).
+
+    Used by `pulp migrate --rebuild` when a renderer change (image
+    embedding, filename format, ...) needs to land on already-ingested
+    items. Item-level failures skip + log + continue. Updates
+    `items.output_path` if the new filename differs.
+    """
+    from pulpline.models import ItemRef
+    from pulpline.sinks.filesystem import FilesystemSink
+    from pulpline.sources import get_source
+    from pulpline.state import (
+        connect as state_connect,
+    )
+    from pulpline.state import (
+        list_items_by_subscription,
+        update_item_path,
+    )
+
+    config = load_config()
+    if name is not None:
+        sub = config.find(name)
+        if sub is None:
+            typer.echo(f"no subscription named {name!r}", err=True)
+            raise typer.Exit(code=1)
+        targets = [sub]
+    else:
+        targets = list(config.subscriptions)
+        if not targets:
+            typer.echo("no subscriptions configured; nothing to rebuild.")
+            return
+
+    grand_rebuilt = 0
+    grand_failed = 0
+    with state_connect() as conn:
+        for sub in targets:
+            try:
+                source_cls = get_source(sub.source)
+            except ValueError as exc:
+                typer.echo(f"  [{sub.name}] unknown source: {exc}", err=True)
+                continue
+
+            items = list_items_by_subscription(conn, sub.name)
+            if not items:
+                continue
+
+            typer.echo(f"rebuilding {sub.name} ({len(items)} item(s))...")
+            sink = FilesystemSink(config.output_dir_for(sub))
+            with source_cls.from_config(config, subscription=sub) as source:
+                for item in items:
+                    ref = ItemRef(url=item.canonical_url, title=item.title)
+                    try:
+                        article = source.fetch(ref)
+                        article = replace(article, subscription_name=sub.name)
+                        content = source.render(article)
+                        new_path = sink.write(article, content, source.extension)
+                    except (FetchError, ExtractionError) as exc:
+                        typer.echo(f"  failed {item.canonical_url}: {exc}", err=True)
+                        grand_failed += 1
+                        continue
+
+                    if item.output_path and item.output_path != str(new_path):
+                        Path(item.output_path).unlink(missing_ok=True)
+                    update_item_path(conn, item.id, str(new_path))
+                    grand_rebuilt += 1
+
+    typer.echo(f"rebuild: {grand_rebuilt} rewritten, {grand_failed} failed")
+    if grand_failed:
+        raise typer.Exit(code=1)
 
 
 _MANGADEX_DEFAULT_MAX_CHAPTERS = 25

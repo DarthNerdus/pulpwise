@@ -307,6 +307,48 @@ def list_items(
     ]
 
 
+def list_items_by_subscription(
+    conn: sqlite3.Connection, subscription_name: str
+) -> list[LibraryItem]:
+    """Return every still-extant item belonging to `subscription_name`.
+
+    Used by `pulp rebuild` to re-render every post in a subscription
+    after a renderer upgrade. Includes only items whose `output_path` is
+    set (excludes soft-deleted) so we don't try to rebuild deleted ones.
+    """
+    rows = conn.execute(
+        "SELECT id, title, canonical_url, subscription_name, ingested_at, pub_date, output_path "
+        "FROM items WHERE subscription_name = ? AND output_path IS NOT NULL "
+        "ORDER BY ingested_at DESC, id DESC",
+        (subscription_name,),
+    ).fetchall()
+    return [
+        LibraryItem(
+            id=int(row["id"]),
+            title=row["title"],
+            canonical_url=row["canonical_url"],
+            subscription_name=row["subscription_name"],
+            ingested_at=row["ingested_at"],
+            pub_date=row["pub_date"],
+            output_path=row["output_path"],
+        )
+        for row in rows
+    ]
+
+
+def update_item_path(conn: sqlite3.Connection, item_id: int, new_path: str) -> None:
+    """Point an existing item at a new on-disk path.
+
+    Called by `pulp rebuild` when the new filename differs from the old
+    (e.g. a renderer upgrade that adds author to the title).
+    """
+    conn.execute(
+        "UPDATE items SET output_path = ? WHERE id = ?",
+        (new_path, item_id),
+    )
+    conn.commit()
+
+
 def count_total(conn: sqlite3.Connection) -> int:
     """Count of currently-extant items (excludes soft-deleted)."""
     row = conn.execute("SELECT COUNT(*) AS n FROM items WHERE output_path IS NOT NULL").fetchone()
