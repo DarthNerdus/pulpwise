@@ -14,7 +14,7 @@ import httpx
 import pytest
 
 from pulpline.auth import CookieEntry
-from pulpline.models import ExtractionError, FetchError
+from pulpline.models import ExtractionError, FetchError, ItemRef
 from pulpline.sources.substack import SubstackSavedSource
 
 SAVES_API = "https://substack.com/api/v1/posts/saved"
@@ -114,6 +114,31 @@ def test_discover_raises_on_garbage_shape() -> None:
         pytest.raises(ExtractionError, match="unexpected shape"),
     ):
         list(source.discover(SAVES_URL))
+
+
+def test_fetch_embeds_author_in_title_for_saved_one_shots() -> None:
+    """Saves land in one folder mixed across publications; filename needs author."""
+    base = "https://samkriss.substack.com"
+    routes = {
+        f"{base}/api/v1/posts/post-one": {
+            "title": "Some Saved Post",
+            "canonical_url": f"{base}/p/post-one",
+            "body_html": "<p>body</p>",
+            "audience": "everyone",
+            "post_date": "2026-04-30T12:00:00.000Z",
+            "publishedBylines": [{"name": "Sam Kriss"}],
+            "publication": {"name": "Numb at the Lodge"},
+        }
+    }
+    client = _routed_client(routes)
+    with SubstackSavedSource(
+        client=client,
+        cookies=[CookieEntry(name="session", value="x", domain=".substack.com")],
+    ) as source:
+        article = source.fetch(ItemRef(url=f"{base}/p/post-one"))
+
+    assert article.title == "Some Saved Post - Sam Kriss"
+    assert article.author == "Sam Kriss"
 
 
 def test_discover_raises_on_http_failure() -> None:

@@ -14,6 +14,7 @@ Two source variants live here:
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -197,6 +198,15 @@ class SubstackSavedSource(SubstackSource):
             )
 
         yield from _yield_post_refs(posts)
+
+    def fetch(self, ref: ItemRef) -> RawArticle:
+        """Saves land in one folder mixed across publications, so embed the
+        author into the title to disambiguate. Per-publication feeds keep the
+        author-less filename because the folder name already carries it."""
+        article = super().fetch(ref)
+        if article.author:
+            return replace(article, title=f"{article.title} - {article.author}")
+        return article
 
 
 def _load_substack_cookies(cfg: Config) -> list[CookieEntry] | None:
