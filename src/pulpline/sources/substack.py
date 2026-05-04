@@ -13,6 +13,7 @@ Two source variants live here:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import replace
 from datetime import datetime
@@ -36,6 +37,7 @@ _DISCOVER_LIMIT = 25
 _SAVED_HOSTS = {"substack.com", "www.substack.com"}
 _SAVED_PATH = "/inbox/saved"
 _SAVED_API = "https://substack.com/api/v1/posts/saved"
+_HOME_POST_RX = re.compile(r"^/home/post/p-(\d+)/?$")
 
 
 class SubstackSource(Source):
@@ -90,8 +92,25 @@ class SubstackSource(Source):
         yield from _yield_post_refs(posts)
 
     def fetch(self, ref: ItemRef) -> RawArticle:
-        base = _base_from_url(ref.url)
-        slug = _slug_from_url(ref.url)
+        # Some saved posts come back with a Substack-reader canonical URL
+        # like `https://substack.com/home/post/p-<id>` instead of the
+        # publication's own per-post URL. Those don't resolve via the
+        # standard /api/v1/posts/<slug> path. Resolve via posts/by-id to
+        # discover the publication's subdomain + the post's slug, then
+        # proceed normally.
+        fetch_url = ref.url
+        home_post_id = _home_post_id(fetch_url)
+        if home_post_id is not None:
+            resolved = self._resolve_home_post(home_post_id)
+            if resolved is None:
+                raise ExtractionError(
+                    f"could not resolve {ref.url}: post may be deleted "
+                    "or its publication isn't accessible to your account."
+                )
+            fetch_url = resolved
+
+        base = _base_from_url(fetch_url)
+        slug = _slug_from_url(fetch_url)
         endpoint = f"{base}/api/v1/posts/{slug}"
 
         try:
@@ -138,6 +157,37 @@ class SubstackSource(Source):
             pub_date=_parse_iso(data.get("post_date")),
             language="en",
         )
+
+    def _resolve_home_post(self, post_id: str) -> str | None:
+        """Resolve `substack.com/home/post/p-<id>` to the publication's URL.
+
+        Hits `/api/v1/posts/by-id/<id>`, reads `publication.subdomain` (or
+        `custom_domain`) and `post.slug`, returns the per-publication URL.
+        None on any failure - caller raises a friendlier error.
+        """
+        try:
+            response = self.client.get(f"https://substack.com/api/v1/posts/by-id/{post_id}")
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPError, ValueError:
+            return None
+
+        post = data.get("post") if isinstance(data, dict) else None
+        publication = data.get("publication") if isinstance(data, dict) else None
+        if not isinstance(post, dict) or not isinstance(publication, dict):
+            return None
+
+        slug = post.get("slug")
+        if not isinstance(slug, str) or not slug:
+            return None
+
+        custom = publication.get("custom_domain")
+        subdomain = publication.get("subdomain")
+        if isinstance(custom, str) and custom.strip():
+            return f"https://{custom.strip()}/p/{slug}"
+        if isinstance(subdomain, str) and subdomain.strip():
+            return f"https://{subdomain.strip()}.substack.com/p/{slug}"
+        return None
 
 
 class SubstackSavedSource(SubstackSource):
@@ -280,6 +330,21 @@ def _slug_from_url(url: str) -> str:
 def _base_from_url(url: str) -> str:
     parts = urlsplit(url)
     return f"{parts.scheme}://{parts.netloc}"
+
+
+def _home_post_id(url: str) -> str | None:
+    """Return the post id if `url` is a `substack.com/home/post/p-<id>` URL.
+
+    The Substack reader app sometimes stores the canonical_url for saved
+    posts in this shape rather than the per-publication form. The standard
+    /api/v1/posts/<slug> endpoint 404s on it; SubstackSource.fetch resolves
+    via /api/v1/posts/by-id/<id> when this matches.
+    """
+    parts = urlsplit(url)
+    if (parts.hostname or "").lower() not in _SAVED_HOSTS:
+        return None
+    match = _HOME_POST_RX.match(parts.path)
+    return match.group(1) if match else None
 
 
 def _hostname(url: str) -> str:

@@ -116,6 +116,48 @@ def test_discover_raises_on_garbage_shape() -> None:
         list(source.discover(SAVES_URL))
 
 
+def test_fetch_resolves_home_post_url_via_by_id_endpoint() -> None:
+    """A `substack.com/home/post/p-<id>` URL routes through /api/v1/posts/by-id/<id>."""
+    home_url = "https://substack.com/home/post/p-194527278"
+    by_id = "https://substack.com/api/v1/posts/by-id/194527278"
+    publication_post = "https://lewislackey.substack.com/api/v1/posts/why-veganism-is-false"
+
+    routes: dict[str, Any] = {
+        by_id: {
+            "post": {
+                "id": 194527278,
+                "slug": "why-veganism-is-false",
+                "canonical_url": home_url,
+            },
+            "publication": {
+                "id": 3733672,
+                "subdomain": "lewislackey",
+                "custom_domain": None,
+            },
+        },
+        publication_post: {
+            "title": "Why Veganism is False",
+            "canonical_url": "https://lewislackey.substack.com/p/why-veganism-is-false",
+            "body_html": "<p>real body</p>",
+            "audience": "everyone",
+            "post_date": "2026-04-17T18:32:45.670Z",
+            "publishedBylines": [{"name": "Lewis Lackey"}],
+            "publication": {"name": "Lewis' Lackey"},
+        },
+    }
+
+    with SubstackSavedSource(
+        client=_routed_client(routes),
+        cookies=[CookieEntry(name="session", value="x", domain=".substack.com")],
+    ) as source:
+        article = source.fetch(ItemRef(url=home_url))
+
+    assert article.body_html == "<p>real body</p>"
+    # Saves embed author in title; we already exercise that elsewhere but
+    # verify it stacks with home/post resolution.
+    assert article.title == "Why Veganism is False - Lewis Lackey"
+
+
 def test_fetch_embeds_author_in_title_for_saved_one_shots() -> None:
     """Saves land in one folder mixed across publications; filename needs author."""
     base = "https://samkriss.substack.com"
