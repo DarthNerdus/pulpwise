@@ -70,7 +70,11 @@ class AnnaSearcher(Searcher):
 
         auth = cfg.auth_for("annas")
         mirrors_raw = auth.get("mirrors")
-        mirrors = tuple(split_mirrors(mirrors_raw)) if mirrors_raw else discover_anna_mirrors()
+        mirrors = (
+            tuple(split_mirrors(mirrors_raw))
+            if isinstance(mirrors_raw, str) and mirrors_raw
+            else discover_anna_mirrors()
+        )
         return cls(client=client, mirrors=mirrors)
 
     def search(

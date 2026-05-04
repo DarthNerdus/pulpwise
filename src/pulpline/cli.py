@@ -815,7 +815,8 @@ def import_substack(
     config = load_config()
     auth = config.auth_for("substack")
 
-    resolved_username = username or auth.get("username")
+    cfg_username = auth.get("username")
+    resolved_username = username or (cfg_username if isinstance(cfg_username, str) else None)
     if not resolved_username:
         typer.echo(
             "no username given and [auth.substack].username not set in config.",
@@ -823,8 +824,9 @@ def import_substack(
         )
         raise typer.Exit(code=2)
 
+    cfg_cookies_path = auth.get("cookies_path")
     cookies_path = cookies or (
-        Path(auth["cookies_path"]).expanduser() if auth.get("cookies_path") else None
+        Path(cfg_cookies_path).expanduser() if isinstance(cfg_cookies_path, str) else None
     )
     if cookies_path is None:
         typer.echo(

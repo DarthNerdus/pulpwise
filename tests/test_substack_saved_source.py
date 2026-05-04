@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import pytest
 
+from pulpline.auth import CookieEntry
 from pulpline.models import ExtractionError, FetchError
 from pulpline.sources.substack import SubstackSavedSource
 
@@ -67,7 +68,9 @@ def test_discover_yields_itemref_per_saved_post_flat_list() -> None:
     payload = [_post("a", "Post A", 1), _post("b", "Post B", 2)]
     client = _routed_client({SAVES_API: payload})
 
-    with SubstackSavedSource(client=client, cookies={"session": "x"}) as source:
+    with SubstackSavedSource(
+        client=client, cookies=[CookieEntry(name="session", value="x", domain=".substack.com")]
+    ) as source:
         refs = list(source.discover(SAVES_URL))
 
     assert {r.url for r in refs} == {
@@ -81,7 +84,9 @@ def test_discover_handles_posts_wrapper() -> None:
     payload = {"posts": [_post("c", "Post C", 3)]}
     client = _routed_client({SAVES_API: payload})
 
-    with SubstackSavedSource(client=client, cookies={"session": "x"}) as source:
+    with SubstackSavedSource(
+        client=client, cookies=[CookieEntry(name="session", value="x", domain=".substack.com")]
+    ) as source:
         refs = list(source.discover(SAVES_URL))
 
     assert [r.url for r in refs] == ["https://samkriss.substack.com/p/c"]
@@ -92,7 +97,9 @@ def test_discover_handles_post_wrapper_per_entry() -> None:
     payload = [{"post": _post("d", "Post D", 4)}]
     client = _routed_client({SAVES_API: payload})
 
-    with SubstackSavedSource(client=client, cookies={"session": "x"}) as source:
+    with SubstackSavedSource(
+        client=client, cookies=[CookieEntry(name="session", value="x", domain=".substack.com")]
+    ) as source:
         refs = list(source.discover(SAVES_URL))
 
     assert [r.url for r in refs] == ["https://samkriss.substack.com/p/d"]
@@ -101,7 +108,9 @@ def test_discover_handles_post_wrapper_per_entry() -> None:
 def test_discover_raises_on_garbage_shape() -> None:
     client = _routed_client({SAVES_API: {"unexpected": "format"}})
     with (
-        SubstackSavedSource(client=client, cookies={"session": "x"}) as source,
+        SubstackSavedSource(
+            client=client, cookies=[CookieEntry(name="session", value="x", domain=".substack.com")]
+        ) as source,
         pytest.raises(ExtractionError, match="unexpected shape"),
     ):
         list(source.discover(SAVES_URL))
@@ -110,7 +119,9 @@ def test_discover_raises_on_garbage_shape() -> None:
 def test_discover_raises_on_http_failure() -> None:
     client = _routed_client({}, status=500)  # 404s everything because no route
     with (
-        SubstackSavedSource(client=client, cookies={"session": "x"}) as source,
+        SubstackSavedSource(
+            client=client, cookies=[CookieEntry(name="session", value="x", domain=".substack.com")]
+        ) as source,
         pytest.raises(FetchError, match="failed to list saved"),
     ):
         list(source.discover(SAVES_URL))

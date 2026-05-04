@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import pytest
 
+from pulpline.auth import CookieEntry
 from pulpline.config import Config
 from pulpline.models import ExtractionError, FetchError, ItemRef
 from pulpline.sources.substack import SubstackSource
@@ -110,7 +111,8 @@ def test_from_config_loads_cookies_when_configured(tmp_path: Any) -> None:
     cfg = Config(auth={"substack": {"cookies_path": str(cookies_file)}})
 
     source = SubstackSource.from_config(cfg)
-    assert source._cookies == {"substack.sid": "abc"}  # private but stable in tests
+    assert source._cookies is not None
+    assert {(c.name, c.value) for c in source._cookies} == {("substack.sid", "abc")}
 
 
 def test_from_config_no_cookies_when_not_configured() -> None:
@@ -129,7 +131,10 @@ def test_cookies_threaded_through_to_request() -> None:
         return httpx.Response(200, json=_archive_payload())
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    with SubstackSource(client=client, cookies={"substack.sid": "secret"}) as source:
+    with SubstackSource(
+        client=client,
+        cookies=[CookieEntry(name="substack.sid", value="secret", domain=".substack.com")],
+    ) as source:
         list(source.discover(base))
 
     assert seen["cookie_header"] is not None

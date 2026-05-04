@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from pulpline.auth import load_cookies
+from pulpline.auth import CookieEntry, load_cookies_with_domain
 from pulpline.models import ExtractionError, FetchError, ItemRef, RawArticle
 from pulpline.sources.base import Source
 
@@ -43,18 +43,18 @@ class SubstackSource(Source):
     def __init__(
         self,
         client: httpx.Client | None = None,
-        cookies: dict[str, str] | None = None,
+        cookies: list[CookieEntry] | None = None,
     ) -> None:
         super().__init__(client=client)
         self._cookies = cookies
         self._publication_url: str = ""
-        # Attach substack cookies to the client cookie jar with domain scope,
-        # so httpx auto-attaches them only on requests to *.substack.com.
-        # (httpx 0.28 deprecated per-request `cookies=` for ambiguous-persistence
-        # reasons; attaching once with proper scope is the supported path.)
+        # Attach each cookie with its native domain so a single SubstackSource
+        # can hold sessions for substack.com AND custom-domain publications
+        # like astralcodexten.com simultaneously. httpx routes each cookie to
+        # requests whose host matches the cookie's domain scope.
         if cookies:
-            for name, value in cookies.items():
-                self.client.cookies.set(name, value, domain=".substack.com")
+            for c in cookies:
+                self.client.cookies.set(c.name, c.value, domain=c.domain)
 
     @classmethod
     def from_config(
@@ -64,9 +64,7 @@ class SubstackSource(Source):
         subscription: object | None = None,
     ) -> SubstackSource:
         del subscription
-        cookies_path = cfg.auth_for("substack").get("cookies_path")
-        cookies = load_cookies(Path(cookies_path)) if cookies_path else None
-        return cls(client=client, cookies=cookies)
+        return cls(client=client, cookies=_load_substack_cookies(cfg))
 
     def discover(self, target_url: str) -> Iterable[ItemRef]:
         self._publication_url = target_url.rstrip("/")
@@ -108,10 +106,25 @@ class SubstackSource(Source):
 
         body_html = data.get("body_html")
         if not body_html:
-            if data.get("audience") == "only_paid" and not self._cookies:
-                raise ExtractionError(
-                    f"{ref.url} is paywalled; configure [auth.substack].cookies_path"
-                )
+            audience = data.get("audience")
+            if audience == "only_paid":
+                if not self._cookies:
+                    raise ExtractionError(
+                        f"{ref.url} is paywalled; configure [auth.substack].cookies_path"
+                    )
+                # Cookies are present but the body still came back empty.
+                # Most common cause: this publication runs on a custom
+                # domain (ACX on astralcodexten.com etc.) and the user's
+                # cookies only cover *.substack.com.
+                host = _hostname(ref.url)
+                if not host.endswith(".substack.com"):
+                    raise ExtractionError(
+                        f"{ref.url} is paywalled; the cookies in "
+                        "[auth.substack].cookies_path don't authenticate "
+                        f"against {host} (custom domain). Export this site's "
+                        "cookies separately and add the file to "
+                        "[auth.substack].extra_cookies_paths."
+                    )
             raise ExtractionError(f"post {ref.url} has empty body_html")
 
         return RawArticle(
@@ -184,6 +197,34 @@ class SubstackSavedSource(SubstackSource):
             )
 
         yield from _yield_post_refs(posts)
+
+
+def _load_substack_cookies(cfg: Config) -> list[CookieEntry] | None:
+    """Merge the primary + every extra cookie file referenced in config.
+
+    Substack publications on custom domains (ACX on astralcodexten.com,
+    Stratechery on stratechery.com) use their own session cookies. Users
+    export those into separate files and list them under
+    `[auth.substack].extra_cookies_paths`. Empty/missing config returns None.
+    """
+    auth = cfg.auth_for("substack")
+    paths: list[Path] = []
+    primary = auth.get("cookies_path")
+    if isinstance(primary, str) and primary:
+        paths.append(Path(primary).expanduser())
+    extra = auth.get("extra_cookies_paths")
+    if isinstance(extra, list):
+        for p in extra:
+            if isinstance(p, str):
+                paths.append(Path(p).expanduser())
+
+    if not paths:
+        return None
+
+    all_cookies: list[CookieEntry] = []
+    for path in paths:
+        all_cookies.extend(load_cookies_with_domain(path))
+    return all_cookies
 
 
 def _unwrap_post_list(payload: object) -> list[Any] | None:

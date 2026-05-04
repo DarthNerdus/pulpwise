@@ -119,12 +119,18 @@ class AnnaSource(Source):
     ) -> AnnaSource:
         del subscription
         auth = cfg.auth_for("annas")
-        api_key = os.environ.get(_ENV_KEY) or auth.get("api_key") or None
+        env_key = os.environ.get(_ENV_KEY)
+        cfg_key = auth.get("api_key")
+        api_key = env_key or (cfg_key if isinstance(cfg_key, str) else None) or None
         mirrors_raw = auth.get("mirrors")
         # No explicit override -> ask SLUM. discover_anna_mirrors falls
         # back to the hardcoded set on any failure, so we never end up
         # with zero mirrors here.
-        mirrors = tuple(split_mirrors(mirrors_raw)) if mirrors_raw else discover_anna_mirrors()
+        mirrors = (
+            tuple(split_mirrors(mirrors_raw))
+            if isinstance(mirrors_raw, str) and mirrors_raw
+            else discover_anna_mirrors()
+        )
         return cls(client=client, api_key=api_key, mirrors=mirrors)
 
     def discover(self, target_url: str) -> Iterable[ItemRef]:

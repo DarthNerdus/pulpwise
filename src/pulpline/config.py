@@ -67,11 +67,16 @@ class Config:
     """
 
     paths: Paths = field(default_factory=Paths)
-    auth: dict[str, dict[str, str]] = field(default_factory=dict)
+    auth: dict[str, dict[str, str | list[str]]] = field(default_factory=dict)
     subscriptions: tuple[Subscription, ...] = ()
 
-    def auth_for(self, source: str) -> dict[str, str]:
-        """Return the auth subtable for a source, empty if unset."""
+    def auth_for(self, source: str) -> dict[str, str | list[str]]:
+        """Return the auth subtable for a source, empty if unset.
+
+        Values can be either strings (`api_key`, `cookies_path`, ...) or
+        lists of strings (`extra_cookies_paths`); each source's plugin is
+        responsible for type-checking what it reads.
+        """
         return self.auth.get(source, {})
 
     def find(self, name: str) -> Subscription | None:
@@ -193,19 +198,28 @@ def _from_raw(raw: dict[str, object]) -> Config:
     return Config(paths=Paths(output_dir=output_dir), auth=auth, subscriptions=tuple(subs))
 
 
-def _auth_from_raw(raw: object) -> dict[str, dict[str, str]]:
-    """Validate `[auth]` is `{source: {key: str}}`. Core code stays source-agnostic."""
+def _auth_from_raw(raw: object) -> dict[str, dict[str, str | list[str]]]:
+    """Validate `[auth]` is `{source: {key: str | list[str]}}`.
+
+    Strings cover the common cases (`api_key`, `cookies_path`); lists of
+    strings cover the rare multi-value case (`extra_cookies_paths` for
+    Substack publications on multiple custom domains). Core code stays
+    source-agnostic.
+    """
     if not isinstance(raw, dict):
         raise ConfigError("`auth` must be a table")
-    out: dict[str, dict[str, str]] = {}
+    out: dict[str, dict[str, str | list[str]]] = {}
     for source_name, sub in raw.items():
         if not isinstance(sub, dict):
             raise ConfigError(f"`auth.{source_name}` must be a table")
-        validated: dict[str, str] = {}
+        validated: dict[str, str | list[str]] = {}
         for k, v in sub.items():
-            if not isinstance(v, str):
-                raise ConfigError(f"`auth.{source_name}.{k}` must be a string")
-            validated[k] = v
+            if isinstance(v, str):
+                validated[k] = v
+            elif isinstance(v, list) and all(isinstance(item, str) for item in v):
+                validated[k] = list(v)
+            else:
+                raise ConfigError(f"`auth.{source_name}.{k}` must be a string or list of strings")
         out[source_name] = validated
     return out
 
