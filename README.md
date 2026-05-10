@@ -61,11 +61,14 @@ For a more interactive view of your library and ingestion stats:
 pulp tui
 ```
 
-Four tabs:
+Five tabs:
 
-- **Library**: every ingested item, filterable by title or URL. `/` focuses
-  the filter, `enter` opens the highlighted file in your OS default app
-  (Preview / xdg-open / Explorer).
+- **Library**: every ingested item, grouped by subscription, filterable by
+  title or URL. `/` focuses the filter, `enter` opens the highlighted file
+  in your OS default app (Preview / xdg-open / Explorer), `d` soft-deletes
+  it (file removed, ledger row kept so the next sync won't re-fetch).
+  Collapse state on the group nodes survives refreshes, so deleting an
+  item doesn't blow open every group you'd closed.
 - **Subscriptions**: name / source / item count / last sync / status / URL,
   with the last error surfaced for any failing feed. `d` removes the
   highlighted subscription (config-only - already-written EPUBs stay).
@@ -74,15 +77,19 @@ Four tabs:
   rows (or the cursor row if none picked). Quota left and per-download
   status surface in the line below the table. Same backend as
   `pulp search anna` from the CLI.
-- **Sync**: pulpline ingestion status (per-subscription last sync + error)
-  on top, syncthing delivery status below (devices online, folders, daemon
-  version). When syncthing isn't installed, the lower section says so and
-  pulpline still shows its own state.
+- **Sync**: per-subscription pipeline status as one merged list. `s`
+  (from any tab) kicks off a sync; rows morph from "last synced at"
+  timestamps into live `12/16  Title` progress while a sub is running,
+  then settle on `+3 new` / `2 paywalled` / `no change` once finished.
+  Below: Syncthing delivery status (devices online, folders, daemon
+  version). When Syncthing isn't installed, the lower section says so
+  and pulpline still shows its own state.
 - **Stats**: total / 7-day / 30-day / 1-year counts, per-source bars,
   per-format bars (EPUB vs PDF), 30-day daily activity bars.
 
-`tab` cycles tabs, `r` refreshes data, `q` quits. Adding a new view is one
-file in `src/pulpline/tui/views/` plus an entry in `views/__init__.VIEWS`.
+`tab` cycles tabs, `s` runs a sync, `r` refreshes data, `q` quits. Adding
+a new view is one file in `src/pulpline/tui/views/` plus an entry in
+`views/__init__.VIEWS`.
 
 ## Manga (MangaDex)
 
@@ -296,6 +303,44 @@ Cookies expire after a few weeks; when they do, re-export and update the
 Cookie files contain session credentials - treat them like passwords. They
 sit in `~/.config/pulpline/` by convention, which is `chmod 600`-able.
 
+### Auto-reconcile from cron
+
+Once `[auth.substack]` is set, `pulp import substack --auto` runs
+non-interactively against the username and cookies file already in
+config: it fetches your current follow list, adds any new publications
+as subscriptions, and is a no-op for ones you already have. Pair it
+with `pulp sync` in cron / launchd to pick up newly-followed
+publications without ever opening a prompt:
+
+```
+*/30 * * * *  pulp import substack --auto && pulp sync
+```
+
+### Custom-domain publications (ACX, etc.)
+
+Some Substack publications run on their own domain (e.g.
+`astralcodexten.com`). The cookies you exported from `substack.com`
+**don't authenticate against those domains**, so paid posts come back
+empty and pulpline reports them as `paywalled` rather than fetching
+them. Export a separate cookies file from the custom domain while
+logged in there, and point pulpline at both:
+
+```toml
+[auth.substack]
+cookies_path = "~/.config/pulpline/substack-cookies.json"
+extra_cookies_paths = [
+  "~/.config/pulpline/astralcodexten-cookies.json",
+]
+```
+
+Pulpline attaches each cookie under its source domain, so the right
+one is sent to the right host.
+
+When sync runs into a paywall, the per-subscription summary line
+shows `2 paywalled` instead of bumping the error count. That's a hint
+to refresh the cookies for that host, not a sign the pipeline is
+broken.
+
 ### Saved-for-later posts
 
 Substack lets you "save for later" while scrolling - that's a per-account
@@ -314,6 +359,13 @@ your cookies first and add a `[auth.substack]` block to `config.toml`.
 Re-running with no new saves is a no-op (deduped via the items ledger).
 Re-saving a post you already ingested is also a no-op for the same
 reason.
+
+Saved-post EPUBs are named `Title - Author.epub` so the saves folder
+on the Boox is scannable at a glance (saves come from many publications,
+so the bare title isn't always enough to recognize a piece). The EPUB
+renderer also downloads and embeds inline `<img>` content, so articles
+read without internet on the device - if the post had figures, they're
+in the file.
 
 ## File organization + deletion
 
@@ -381,6 +433,23 @@ output_dir = "~/Sync/Manga/Berserk"      # per-subscription override
 ```
 
 State (the dedup ledger and per-subscription run state) lives in `~/.local/share/pulpline/state.db`. Removing it forces a full re-sync of every subscription.
+
+## Re-rendering existing items
+
+When the renderer improves (e.g., it gains image embedding, or you
+flip on a new EPUB option), older items stay in the form they were
+first written. To re-render them in place against the current code:
+
+```bash
+pulp migrate --rebuild                  # every item, every subscription
+pulp migrate --rebuild --name samkriss  # just one subscription
+```
+
+`--rebuild` re-fetches each item from its source, runs the current
+renderer over it, and overwrites the file at the same path the ledger
+records. It does *not* re-discover new items - that's `pulp sync`'s
+job. Use it when you want yesterday's saves to pick up today's
+renderer behavior.
 
 ## Scheduling
 
