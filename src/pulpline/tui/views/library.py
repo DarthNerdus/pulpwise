@@ -72,6 +72,15 @@ class LibraryView(View):
             groups[bucket].append(item)
 
         tree: Tree[LibraryItem] = self.query_one(Tree)
+        # Tree.clear() drops collapse state, so snapshot which buckets the
+        # user had collapsed and re-apply after rebuild. Otherwise actions
+        # like delete (which trigger a full refresh) silently re-expand
+        # everything.
+        collapsed_buckets = {
+            _bucket_from_label(str(node.label))
+            for node in tree.root.children
+            if not node.is_expanded
+        }
         tree.clear()
         if not groups:
             tree.root.add_leaf("(empty - add something with `pulp add <url>`)")
@@ -83,7 +92,7 @@ class LibraryView(View):
             count_label = _count_label(len(bucket_items), totals.get(bucket))
             group_node: TreeNode[LibraryItem] = tree.root.add(
                 f"{bucket}  {count_label}",
-                expand=True,
+                expand=bucket not in collapsed_buckets,
             )
             for item in bucket_items:
                 date = item.ingested_at[:10] if item.ingested_at else ""
@@ -126,6 +135,11 @@ def _count_label(downloaded: int, total: int | None) -> str:
     if total is not None and total > 0:
         return f"({downloaded}/{total})"
     return f"({downloaded})"
+
+
+def _bucket_from_label(label: str) -> str:
+    """Strip the trailing count chip ('  (N)' or '  (N/M)') from a group label."""
+    return label.rsplit("  (", 1)[0]
 
 
 def _open_file(path: str) -> None:
