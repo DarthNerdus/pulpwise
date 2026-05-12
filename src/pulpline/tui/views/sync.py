@@ -21,6 +21,7 @@ from textual.containers import Vertical
 from textual.widgets import Static
 
 from pulpline.config import Subscription, load_config
+from pulpline.importers.substack import SubstackAutoOutcome, auto_reconcile
 from pulpline.models import ExtractionError, FetchError
 from pulpline.pipeline import (
     ProgressReporter,
@@ -104,6 +105,13 @@ class SyncView(View):
     def _do_sync(self) -> None:
         try:
             cfg = load_config()
+            # Auto-reconcile substack follows so a publication you just
+            # subscribed-to on your phone joins the sync without a separate
+            # `pulp import substack --auto` step. Failures (expired cookies,
+            # network blip) are surfaced as notifications but do not block
+            # the actual sync, which is the higher-value operation.
+            cfg, auto = auto_reconcile(cfg)
+            self._notify_auto_outcome(auto)
             reporter = _TuiProgress(self)
             total = pipeline_sync(config=cfg, progress=reporter)
         except (FetchError, ExtractionError) as exc:
@@ -113,6 +121,26 @@ class SyncView(View):
             self.app.call_from_thread(self._on_done, None, f"{type(exc).__name__}: {exc}")
             return
         self.app.call_from_thread(self._on_done, total, None)
+
+    def _notify_auto_outcome(self, outcome: SubstackAutoOutcome) -> None:
+        """Surface substack auto-reconcile result to the UI from the worker thread."""
+        if outcome.skipped:
+            return
+        if outcome.error:
+            self.app.call_from_thread(
+                self.app.notify,
+                outcome.error,
+                severity="warning",
+            )
+            return
+        if outcome.added:
+            preview = ", ".join(outcome.added[:3])
+            if len(outcome.added) > 3:
+                preview += f", +{len(outcome.added) - 3} more"
+            self.app.call_from_thread(
+                self.app.notify,
+                f"imported {len(outcome.added)} new substack(s): {preview}",
+            )
 
     # ---- progress callbacks (UI thread) ----
 
