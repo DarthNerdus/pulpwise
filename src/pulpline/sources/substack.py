@@ -42,6 +42,12 @@ _SAVED_PATH = "/inbox/saved"
 # user's session cookies as before. Response wraps posts under `posts`,
 # which `_unwrap_post_list` already handles.
 _SAVED_API = "https://substack.com/api/v1/reader/posts"
+# The reader endpoint server-side-validates `limit` and rejects values
+# >20 with a 400 ("Invalid value"). The old /posts/saved tolerated 25;
+# this one doesn't. Keep this separate from `_DISCOVER_LIMIT` so the
+# archive feed (which still accepts 25) doesn't get unnecessarily
+# narrowed.
+_SAVED_DISCOVER_LIMIT = 20
 _HOME_POST_RX = re.compile(r"^/home/post/p-(\d+)/?$")
 
 
@@ -234,7 +240,7 @@ class SubstackSavedSource(SubstackSource):
         try:
             response = self.client.get(
                 _SAVED_API,
-                params={"bucket": "saved", "limit": str(_DISCOVER_LIMIT)},
+                params={"bucket": "saved", "limit": str(_SAVED_DISCOVER_LIMIT)},
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
