@@ -64,6 +64,21 @@ class LibraryView(View):
         tree.show_root = False
         tree.guide_depth = 3
         self.refresh_data()
+        # Focus the Tree (not the filter Input) so view-level bindings -
+        # `d`, `D`, `enter` - dispatch when you press them. Without this,
+        # focus lands on the Input by compose-order default and every
+        # keystroke gets eaten by the filter field.
+        tree.focus()
+
+    def on_show(self) -> None:
+        """When switching back to the Library tab, restore Tree focus.
+
+        Tab switching doesn't re-fire on_mount, so without this the Tree
+        only has focus on first load - subsequent visits would land focus
+        somewhere unhelpful and view bindings would stop showing in the
+        footer.
+        """
+        self.query_one(Tree).focus()
 
     def refresh_data(self) -> None:
         filter_input = self.query_one("#library-filter", Input)
