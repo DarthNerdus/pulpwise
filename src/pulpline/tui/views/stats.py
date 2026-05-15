@@ -76,6 +76,14 @@ def _totals_text(*, total: int, week: int, month: int, year: int) -> Text:
 
 
 def _section_bars(heading: str, counts: dict[str, int]) -> Text:
+    """Horizontal bars scaled to the largest bucket (not to total).
+
+    Scaling to total wastes the visual range when many buckets share the
+    space evenly: with 10 sources the leader is ~17%, and 17% of bar width
+    looks small. Scaling to max means the leader's bar always fills the
+    line; every other bar reads as 'this fraction of the leader.' The
+    absolute share stays accessible via the trailing percentage label.
+    """
     text = Text()
     text.append(f"\n{heading}\n", style="bold")
     if not counts:
@@ -83,10 +91,11 @@ def _section_bars(heading: str, counts: dict[str, int]) -> Text:
         return text
 
     total = sum(counts.values())
+    peak = max(counts.values())
     name_w = max(len(name) for name in counts)
     for name, n in counts.items():
         pct = n / total if total else 0
-        filled = round(pct * _BAR_WIDTH)
+        filled = round(n / peak * _BAR_WIDTH) if peak else 0
         bar = "█" * filled + "░" * (_BAR_WIDTH - filled)
         text.append(f"  {name:<{name_w}}  {bar}  {n}  ({pct * 100:.0f}%)\n")
     return text
