@@ -152,9 +152,7 @@ def auto_reconcile(
         try:
             pubs = list_user_subscriptions(cfg_username, cookies, client)
         except httpx.HTTPError as exc:
-            return config, SubstackAutoOutcome(
-                error=f"substack follows fetch failed: {exc}"
-            )
+            return config, SubstackAutoOutcome(error=f"substack follows fetch failed: {exc}")
     finally:
         if owns_client:
             client.close()

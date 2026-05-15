@@ -151,9 +151,7 @@ def test_auto_reconcile_returns_error_on_missing_cookies_file(tmp_path: Path) ->
 
 def test_auto_reconcile_returns_error_on_http_failure(tmp_path: Path) -> None:
     cfg = Config(auth=_auth(tmp_path))
-    client = httpx.Client(
-        transport=httpx.MockTransport(lambda r: httpx.Response(500, text="boom"))
-    )
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(500, text="boom")))
     new_cfg, outcome = auto_reconcile(cfg, client=client)
     assert outcome.error is not None
     assert "follows fetch failed" in outcome.error
