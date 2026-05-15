@@ -34,16 +34,21 @@ CREATE TABLE IF NOT EXISTS items (
     title TEXT,
     pub_date TEXT,
     ingested_at TEXT NOT NULL,
-    output_path TEXT
+    output_path TEXT,
+    deleted_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_items_subscription ON items(subscription_name);
 """
 
-# Forward migration: add total_items to subscription_state on older DBs.
-# SQLite doesn't have IF NOT EXISTS for ADD COLUMN, so we try and swallow.
+# Forward migration: add columns to older DBs in place.
+# SQLite doesn't have IF NOT EXISTS for ADD COLUMN, so we try and swallow
+# in `connect()` below. Items soft-deleted before `deleted_at` shipped will
+# carry NULL deleted_at — the tombstone-without-timestamp is rendered as
+# "(unknown)" in the deleted listings.
 _MIGRATIONS = [
     "ALTER TABLE subscription_state ADD COLUMN total_items INTEGER",
+    "ALTER TABLE items ADD COLUMN deleted_at TEXT",
 ]
 
 
@@ -149,7 +154,8 @@ def record_item(conn: sqlite3.Connection, item: ItemRecord) -> None:
             title = excluded.title,
             pub_date = excluded.pub_date,
             ingested_at = excluded.ingested_at,
-            output_path = excluded.output_path
+            output_path = excluded.output_path,
+            deleted_at = NULL
         """,
         (
             item.subscription_name,
@@ -166,17 +172,20 @@ def record_item(conn: sqlite3.Connection, item: ItemRecord) -> None:
 
 
 def delete_item(conn: sqlite3.Connection, item_id: int) -> None:
-    """Soft-delete: remove the file from disk and null out `output_path`.
+    """Soft-delete: remove the file from disk and tombstone the row.
 
     Keeps the row in `items` so dedup remembers the URL was ingested - sync
     won't re-fetch it. To bring it back, `pulp add <url>` re-ingests via the
-    upsert path in `record_item`.
+    upsert path in `record_item`, which also clears `deleted_at`.
     """
     row = conn.execute("SELECT output_path FROM items WHERE id = ?", (item_id,)).fetchone()
     if row is not None and row["output_path"]:
         with contextlib.suppress(OSError):
             Path(str(row["output_path"])).unlink(missing_ok=True)
-    conn.execute("UPDATE items SET output_path = NULL WHERE id = ?", (item_id,))
+    conn.execute(
+        "UPDATE items SET output_path = NULL, deleted_at = ? WHERE id = ?",
+        (_now_iso(), item_id),
+    )
     conn.commit()
 
 
@@ -273,6 +282,8 @@ class LibraryItem:
     ingested_at: str
     pub_date: str | None
     output_path: str | None
+    # NULL for live items and for items soft-deleted before the column shipped.
+    deleted_at: str | None = None
 
 
 def list_items(
@@ -282,7 +293,8 @@ def list_items(
 ) -> list[LibraryItem]:
     """Return recent items, optionally filtered by case-insensitive title/url match."""
     sql = (
-        "SELECT id, title, canonical_url, subscription_name, ingested_at, pub_date, output_path "
+        "SELECT id, title, canonical_url, subscription_name, ingested_at, pub_date, "
+        "output_path, deleted_at "
         "FROM items WHERE output_path IS NOT NULL"
     )
     params: list[object] = []
@@ -302,6 +314,7 @@ def list_items(
             ingested_at=row["ingested_at"],
             pub_date=row["pub_date"],
             output_path=row["output_path"],
+            deleted_at=row["deleted_at"],
         )
         for row in rows
     ]
@@ -317,7 +330,8 @@ def list_items_by_subscription(
     set (excludes soft-deleted) so we don't try to rebuild deleted ones.
     """
     rows = conn.execute(
-        "SELECT id, title, canonical_url, subscription_name, ingested_at, pub_date, output_path "
+        "SELECT id, title, canonical_url, subscription_name, ingested_at, pub_date, "
+        "output_path, deleted_at "
         "FROM items WHERE subscription_name = ? AND output_path IS NOT NULL "
         "ORDER BY ingested_at DESC, id DESC",
         (subscription_name,),
@@ -331,6 +345,7 @@ def list_items_by_subscription(
             ingested_at=row["ingested_at"],
             pub_date=row["pub_date"],
             output_path=row["output_path"],
+            deleted_at=row["deleted_at"],
         )
         for row in rows
     ]
@@ -403,6 +418,87 @@ def items_per_day(conn: sqlite3.Connection, days: int = 30) -> list[tuple[str, i
         day = today - timedelta(days=offset)
         out.append((day.isoformat(), by_day.get(day.isoformat(), 0)))
     return out
+
+
+def activity_per_day(conn: sqlite3.Connection, days: int = 30) -> list[tuple[str, int, int]]:
+    """Return [(YYYY-MM-DD, added, deleted), ...] for the last `days` days.
+
+    `added` counts items first ingested on that day (uses `ingested_at`),
+    including any that were later soft-deleted - so the historical view
+    doesn't retroactively shrink when you tidy up.
+
+    `deleted` counts items soft-deleted on that day. Items deleted before
+    `deleted_at` was added to the schema have NULL there and are not
+    counted (we can't know what day they were deleted).
+    """
+    # Two independent aggregates, joined in Python so days with adds-but-no-deletes
+    # (or vice versa) still appear.
+    added_rows = conn.execute(
+        "SELECT substr(ingested_at, 1, 10) AS day, COUNT(*) AS n "
+        "FROM items WHERE ingested_at >= ? "
+        "GROUP BY day",
+        ((datetime.now(tz=UTC) - timedelta(days=days)).date().isoformat(),),
+    ).fetchall()
+    added_by_day = {row["day"]: int(row["n"]) for row in added_rows}
+
+    deleted_rows = conn.execute(
+        "SELECT substr(deleted_at, 1, 10) AS day, COUNT(*) AS n "
+        "FROM items WHERE deleted_at IS NOT NULL AND deleted_at >= ? "
+        "GROUP BY day",
+        ((datetime.now(tz=UTC) - timedelta(days=days)).date().isoformat(),),
+    ).fetchall()
+    deleted_by_day = {row["day"]: int(row["n"]) for row in deleted_rows}
+
+    today = datetime.now(tz=UTC).date()
+    out: list[tuple[str, int, int]] = []
+    for offset in range(days):
+        day = (today - timedelta(days=offset)).isoformat()
+        out.append((day, added_by_day.get(day, 0), deleted_by_day.get(day, 0)))
+    return out
+
+
+def list_recently_deleted(
+    conn: sqlite3.Connection,
+    limit: int = 200,
+    filter_text: str | None = None,
+) -> list[LibraryItem]:
+    """Return soft-deleted items, most-recently-deleted first.
+
+    Items with NULL `deleted_at` (deleted before the column existed) are
+    included but sorted last - we know they're deleted, just not when.
+
+    Returns the same `LibraryItem` dataclass as `list_items`: `output_path`
+    is always None and `deleted_at` is set (possibly NULL for historic
+    rows). The library view branches on `deleted_at`/`output_path` rather
+    than on type.
+    """
+    sql = (
+        "SELECT id, title, canonical_url, subscription_name, ingested_at, pub_date, "
+        "output_path, deleted_at "
+        "FROM items WHERE output_path IS NULL"
+    )
+    params: list[object] = []
+    if filter_text:
+        sql += " AND (LOWER(title) LIKE ? OR LOWER(canonical_url) LIKE ?)"
+        like = f"%{filter_text.lower()}%"
+        params.extend([like, like])
+    # NULL deleted_at sorts last via COALESCE-to-empty; otherwise newest first.
+    sql += " ORDER BY COALESCE(deleted_at, '') DESC, ingested_at DESC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
+    return [
+        LibraryItem(
+            id=int(row["id"]),
+            title=row["title"],
+            canonical_url=row["canonical_url"],
+            subscription_name=row["subscription_name"],
+            ingested_at=row["ingested_at"],
+            pub_date=row["pub_date"],
+            output_path=row["output_path"],
+            deleted_at=row["deleted_at"],
+        )
+        for row in rows
+    ]
 
 
 def _now_iso() -> str:

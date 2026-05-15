@@ -196,6 +196,156 @@ def test_items_per_day_includes_zeros(tmp_path: Path) -> None:
     assert sum(counts.values()) == 1
 
 
+def test_delete_item_records_deleted_at(tmp_path: Path) -> None:
+    """Soft-delete writes a timestamp so we can group deletions by day later."""
+    from pulpline.state import delete_item
+
+    db = tmp_path / "state.db"
+    with connect(db) as conn:
+        record_item(conn, _record(dedup="k1", path="/tmp/x.epub"))
+        item_id = conn.execute("SELECT id FROM items WHERE dedup_key = ?", ("k1",)).fetchone()["id"]
+        delete_item(conn, item_id)
+
+        row = conn.execute(
+            "SELECT output_path, deleted_at FROM items WHERE id = ?", (item_id,)
+        ).fetchone()
+        assert row["output_path"] is None
+        assert row["deleted_at"] is not None  # ISO timestamp; format-checked elsewhere
+        # The format is the same isoformat _now_iso uses; loose-validate it starts with year.
+        assert row["deleted_at"][:4].isdigit()
+
+
+def test_record_item_clears_deleted_at_on_revive(tmp_path: Path) -> None:
+    """`pulp add <url>` on a deleted item must clear the tombstone, else we'd
+    have a row with both output_path AND deleted_at set - logically inconsistent."""
+    from pulpline.state import delete_item
+
+    db = tmp_path / "state.db"
+    f1 = tmp_path / "v1.epub"
+    f1.write_bytes(b"x")
+    with connect(db) as conn:
+        record_item(conn, _record(dedup="k1", path=str(f1)))
+        item_id = conn.execute("SELECT id FROM items WHERE dedup_key = ?", ("k1",)).fetchone()["id"]
+        delete_item(conn, item_id)
+
+        # Confirm the tombstone is set.
+        assert (
+            conn.execute("SELECT deleted_at FROM items WHERE id = ?", (item_id,)).fetchone()[
+                "deleted_at"
+            ]
+            is not None
+        )
+
+        # Re-ingest via the upsert path.
+        f2 = tmp_path / "v2.epub"
+        f2.write_bytes(b"y")
+        record_item(conn, _record(dedup="k1", path=str(f2)))
+
+        row = conn.execute(
+            "SELECT output_path, deleted_at FROM items WHERE id = ?", (item_id,)
+        ).fetchone()
+        assert row["output_path"] == str(f2)
+        assert row["deleted_at"] is None
+
+
+def test_activity_per_day_counts_added_and_deleted(tmp_path: Path) -> None:
+    from pulpline.state import activity_per_day, delete_item
+
+    db = tmp_path / "state.db"
+    with connect(db) as conn:
+        # Add three items today.
+        for k in ("k1", "k2", "k3"):
+            record_item(conn, _record(dedup=k, path=f"/tmp/{k}.epub"))
+        # Delete one today.
+        item_id = conn.execute("SELECT id FROM items WHERE dedup_key = 'k1'").fetchone()["id"]
+        delete_item(conn, item_id)
+
+        per_day = activity_per_day(conn, days=7)
+
+    assert len(per_day) == 7
+    _, added, deleted = per_day[0]
+    assert added == 3
+    assert deleted == 1
+    # Other days should be (0, 0)
+    for _, a, d in per_day[1:]:
+        assert (a, d) == (0, 0)
+
+
+def test_activity_per_day_preserves_added_count_after_delete(tmp_path: Path) -> None:
+    """Deleting an item should NOT retroactively shrink the 'added' count.
+
+    Otherwise a tidied-up library would look like nothing was ever ingested
+    on the days you cleaned up - the historical record should be stable.
+    """
+    from pulpline.state import activity_per_day, delete_item
+
+    db = tmp_path / "state.db"
+    with connect(db) as conn:
+        record_item(conn, _record(dedup="k1", path="/tmp/a.epub"))
+        record_item(conn, _record(dedup="k2", path="/tmp/b.epub"))
+
+        before = activity_per_day(conn, days=7)
+        added_before = before[0][1]
+
+        item_id = conn.execute("SELECT id FROM items WHERE dedup_key = 'k1'").fetchone()["id"]
+        delete_item(conn, item_id)
+
+        after = activity_per_day(conn, days=7)
+        added_after = after[0][1]
+
+    assert added_before == 2
+    assert added_after == 2  # unchanged - delete doesn't undo the add
+    assert after[0][2] == 1  # but it shows up as a delete
+
+
+def test_list_recently_deleted_excludes_live_items(tmp_path: Path) -> None:
+    from pulpline.state import delete_item, list_recently_deleted
+
+    db = tmp_path / "state.db"
+    with connect(db) as conn:
+        record_item(conn, _record(dedup="k1", path="/tmp/live.epub"))
+        record_item(conn, _record(dedup="k2", path="/tmp/dead.epub"))
+        dead_id = conn.execute("SELECT id FROM items WHERE dedup_key = 'k2'").fetchone()["id"]
+        delete_item(conn, dead_id)
+
+        deleted = list_recently_deleted(conn)
+
+    assert len(deleted) == 1
+    assert deleted[0].id == dead_id
+    assert deleted[0].output_path is None
+    assert deleted[0].deleted_at is not None
+
+
+def test_list_recently_deleted_legacy_null_timestamp_sorts_last(tmp_path: Path) -> None:
+    """An item soft-deleted before deleted_at shipped has NULL there; it
+    should still appear in the listing but sort after items with timestamps."""
+    from pulpline.state import list_recently_deleted
+
+    db = tmp_path / "state.db"
+    with connect(db) as conn:
+        # Two soft-deleted items via direct SQL (simulating legacy state where
+        # the column existed but wasn't being written). Today's-tombstone has
+        # deleted_at; the legacy one has NULL.
+        record_item(conn, _record(dedup="k1", path="/tmp/legacy.epub"))
+        record_item(conn, _record(dedup="k2", path="/tmp/today.epub"))
+        # Legacy: null out path AND deleted_at to mimic old behavior.
+        conn.execute(
+            "UPDATE items SET output_path = NULL, deleted_at = NULL WHERE dedup_key = 'k1'"
+        )
+        # Today: use the proper helper.
+        today_id = conn.execute("SELECT id FROM items WHERE dedup_key = 'k2'").fetchone()["id"]
+        from pulpline.state import delete_item
+
+        delete_item(conn, today_id)
+
+        deleted = list_recently_deleted(conn)
+
+    # Both appear; the one with deleted_at set comes first.
+    assert len(deleted) == 2
+    assert deleted[0].deleted_at is not None
+    assert deleted[1].deleted_at is None
+
+
 def test_subscription_state_upsert(tmp_path: Path) -> None:
     db = tmp_path / "state.db"
     with connect(db) as conn:

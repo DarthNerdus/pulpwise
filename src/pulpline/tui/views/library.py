@@ -19,6 +19,7 @@ from pulpline.state import (
     delete_item,
     get_subscription_state,
     list_items,
+    list_recently_deleted,
 )
 from pulpline.tui.views.base import View
 
@@ -31,6 +32,7 @@ class LibraryView(View):
         ("/", "focus_filter", "Filter"),
         ("enter", "open_file", "Open"),
         ("d", "delete_file", "Delete"),
+        ("D", "toggle_deleted", "Deleted"),
     ]
 
     DEFAULT_CSS = """
@@ -44,6 +46,13 @@ class LibraryView(View):
         height: 1fr;
     }
     """
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Library has two modes: live items (default) and the tombstone view.
+        # The same Tree is reused so collapse state, cursor focus, and filter
+        # text continue to feel like one widget.
+        self._show_deleted = False
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -61,10 +70,13 @@ class LibraryView(View):
         filter_text = filter_input.value.strip() or None
         totals: dict[str, int | None] = {}
         with connect() as conn:
-            items = list_items(conn, limit=500, filter_text=filter_text)
-            for bucket in {item.subscription_name for item in items if item.subscription_name}:
-                state = get_subscription_state(conn, bucket)
-                totals[bucket] = state.total_items if state else None
+            if self._show_deleted:
+                items = list_recently_deleted(conn, limit=500, filter_text=filter_text)
+            else:
+                items = list_items(conn, limit=500, filter_text=filter_text)
+                for bucket in {item.subscription_name for item in items if item.subscription_name}:
+                    state = get_subscription_state(conn, bucket)
+                    totals[bucket] = state.total_items if state else None
 
         groups: dict[str, list[LibraryItem]] = defaultdict(list)
         for item in items:
@@ -83,21 +95,33 @@ class LibraryView(View):
         }
         tree.clear()
         if not groups:
-            tree.root.add_leaf("(empty - add something with `pulp add <url>`)")
+            empty_msg = (
+                "(nothing deleted yet)"
+                if self._show_deleted
+                else "(empty - add something with `pulp add <url>`)"
+            )
+            tree.root.add_leaf(empty_msg)
             return
 
         ordered = sorted(groups.keys(), key=lambda k: (k != "oneshots", k))
         for bucket in ordered:
             bucket_items = groups[bucket]
             count_label = _count_label(len(bucket_items), totals.get(bucket))
+            heading = f"[deleted] {bucket}" if self._show_deleted else bucket
             group_node: TreeNode[LibraryItem] = tree.root.add(
-                f"{bucket}  {count_label}",
+                f"{heading}  {count_label}",
                 expand=bucket not in collapsed_buckets,
             )
             for item in bucket_items:
-                date = item.ingested_at[:10] if item.ingested_at else ""
+                # Deleted-mode rows lead with the deletion date (when we
+                # have it) so the eye lands on "when did I read this."
+                # Live rows keep the ingestion date to match prior UX.
+                if self._show_deleted:
+                    stamp = (item.deleted_at[:10] if item.deleted_at else "(unknown)  ")[:10]
+                else:
+                    stamp = item.ingested_at[:10] if item.ingested_at else ""
                 title = item.title or "(untitled)"
-                group_node.add_leaf(f"{date}  {title}", data=item)
+                group_node.add_leaf(f"{stamp}  {title}", data=item)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "library-filter":
@@ -110,8 +134,15 @@ class LibraryView(View):
         item = self._selected_item()
         if item and item.output_path:
             _open_file(item.output_path)
+        elif item and self._show_deleted:
+            # No file on disk, but the user can still want the URL — show it.
+            self.notify(item.canonical_url, title="canonical URL", timeout=10)
 
     def action_delete_file(self) -> None:
+        if self._show_deleted:
+            # `d` is a no-op in the tombstone view — these are already deleted
+            # and there's no "permanent delete" until/unless we add one.
+            return
         item = self._selected_item()
         if item is None:
             return
@@ -120,6 +151,11 @@ class LibraryView(View):
             delete_item(conn, item.id)
         self.refresh_data()
         self.notify(f"deleted {title!r}", severity="information")
+
+    def action_toggle_deleted(self) -> None:
+        """Flip between live items and the tombstone view."""
+        self._show_deleted = not self._show_deleted
+        self.refresh_data()
 
     def _selected_item(self) -> LibraryItem | None:
         """Return the LibraryItem under the cursor, or None when on a group node."""
