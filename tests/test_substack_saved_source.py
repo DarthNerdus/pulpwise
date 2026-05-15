@@ -17,7 +17,7 @@ from pulpline.auth import CookieEntry
 from pulpline.models import ExtractionError, FetchError, ItemRef
 from pulpline.sources.substack import SubstackSavedSource
 
-SAVES_API = "https://substack.com/api/v1/posts/saved"
+SAVES_API = "https://substack.com/api/v1/reader/posts"
 SAVES_URL = "https://substack.com/inbox/saved"
 
 
@@ -192,3 +192,24 @@ def test_discover_raises_on_http_failure() -> None:
         pytest.raises(FetchError, match="failed to list saved"),
     ):
         list(source.discover(SAVES_URL))
+
+
+def test_discover_sends_bucket_saved_query_param() -> None:
+    """Pin the contract with Substack's reader endpoint: bucket=saved must be in the
+    query. The endpoint serves multiple buckets; without bucket=saved we'd get
+    a different feed entirely (or a 400)."""
+    seen: dict[str, str | None] = {"query": None}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["query"] = request.url.query.decode("ascii")
+        return httpx.Response(200, json=[_post("a", "Post A", 1)])
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with SubstackSavedSource(
+        client=client,
+        cookies=[CookieEntry(name="session", value="x", domain=".substack.com")],
+    ) as source:
+        list(source.discover(SAVES_URL))
+
+    assert seen["query"] is not None
+    assert "bucket=saved" in seen["query"]

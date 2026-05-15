@@ -36,7 +36,12 @@ _DISCOVER_LIMIT = 25
 
 _SAVED_HOSTS = {"substack.com", "www.substack.com"}
 _SAVED_PATH = "/inbox/saved"
-_SAVED_API = "https://substack.com/api/v1/posts/saved"
+# Substack moved the saved-posts feed off `/api/v1/posts/saved` around
+# May 2026 (that path now 404s). The current endpoint is a bucketed
+# reader feed; passing `bucket=saved` gates the same data behind the
+# user's session cookies as before. Response wraps posts under `posts`,
+# which `_unwrap_post_list` already handles.
+_SAVED_API = "https://substack.com/api/v1/reader/posts"
 _HOME_POST_RX = re.compile(r"^/home/post/p-(\d+)/?$")
 
 
@@ -227,7 +232,10 @@ class SubstackSavedSource(SubstackSource):
                 "logged-in browser session)."
             )
         try:
-            response = self.client.get(_SAVED_API, params={"limit": str(_DISCOVER_LIMIT)})
+            response = self.client.get(
+                _SAVED_API,
+                params={"bucket": "saved", "limit": str(_DISCOVER_LIMIT)},
+            )
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise FetchError(f"failed to list saved posts: {exc}") from exc
