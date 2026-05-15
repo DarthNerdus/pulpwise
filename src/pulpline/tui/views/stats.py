@@ -93,12 +93,19 @@ def _section_bars(heading: str, counts: dict[str, int]) -> Text:
 
 
 def _activity_text(activity: list[tuple[str, int, int]]) -> Text:
-    """Joint added/deleted bars per day.
+    """Joint added/deleted bars per day, shared scale with p90 outlier clipping.
 
-    Both bars scale to a shared peak so visual comparison is honest: a 5-add
-    bar is visibly larger than a 2-delete bar. Days with zero activity get
-    rendered as empty bars rather than dropped, so the time axis stays
-    continuous and "nothing happened on Tuesday" is visible.
+    Shared scale because the whole purpose of putting adds + deletes on the
+    same row is direct comparison ('I grew the library by N today'). The
+    bars are useless for that if they're scaled independently - a single
+    delete would look identical to a 20-delete day on different data.
+
+    p90 of all non-zero activity (both axes combined) sets the scaling
+    baseline. Days above that peak saturate at full bar width; the +N / -N
+    label still tells you the real count. This is the trade: an
+    onboarding-day outlier with 98 adds shouldn't squash every typical day
+    to one cell, but it shouldn't disappear either - saturation conveys
+    'unusually high' without distorting the day-to-day comparison.
     """
     text = Text()
     text.append("\nACTIVITY (last 30 days)  ", style="bold")
@@ -109,7 +116,12 @@ def _activity_text(activity: list[tuple[str, int, int]]) -> Text:
         text.append("  (nothing yet)\n", style="dim")
         return text
 
-    peak = max(max(a, d) for _, a, d in activity) or 1
+    combined: list[int] = []
+    for _, a, d in activity:
+        combined.append(a)
+        combined.append(d)
+    peak = _percentile_peak(combined)
+
     for day, added, deleted in activity:
         added_bar = _scaled_bar(added, peak, _ACTIVITY_BAR_WIDTH)
         deleted_bar = _scaled_bar(deleted, peak, _ACTIVITY_BAR_WIDTH)
@@ -123,10 +135,28 @@ def _activity_text(activity: list[tuple[str, int, int]]) -> Text:
     return text
 
 
+def _percentile_peak(values: list[int], percentile: float = 0.90) -> int:
+    """Pick a chart-scaling peak that ignores outliers.
+
+    Returns the 90th percentile of non-zero values. With few non-zero data
+    points (fewer than 5), falls back to max so the peak doesn't collapse
+    to a tiny number on sparse data. Minimum return is 1 so callers can
+    divide by it safely.
+    """
+    non_zero = sorted(v for v in values if v > 0)
+    if not non_zero:
+        return 1
+    if len(non_zero) < 5:
+        return max(non_zero)
+    idx = min(len(non_zero) - 1, max(0, int(len(non_zero) * percentile) - 1))
+    return max(1, non_zero[idx])
+
+
 def _scaled_bar(value: int, peak: int, width: int) -> str:
+    """Render a bar; values above `peak` saturate at full width."""
     if peak <= 0:
         return "░" * width
-    filled = round(value / peak * width)
+    filled = min(width, round(value / peak * width))
     return "█" * filled + "░" * (width - filled)
 
 
