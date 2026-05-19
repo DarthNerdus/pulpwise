@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from textual import work
 from textual.app import ComposeResult
 from textual.widgets import DataTable, Static
 
+from pulpline import pipeline
 from pulpline.config import (
     ConfigError,
     Subscription,
@@ -21,6 +23,8 @@ from pulpline.state import (
     get_subscription_state,
 )
 from pulpline.tui.views.base import View
+
+_BACKFILL_DEFAULT_POSTS = 50
 
 
 class SubscriptionsView(View):
@@ -49,6 +53,7 @@ class SubscriptionsView(View):
 
     BINDINGS = [  # noqa: RUF012
         ("d", "delete_selected", "Delete"),
+        ("b", "backfill_selected", "Backfill"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -129,6 +134,61 @@ class SubscriptionsView(View):
         save_config(new_config)
         self.refresh_data()
         self.notify(f"removed {sub.name!r}", severity="information")
+
+    def action_backfill_selected(self) -> None:
+        """Pull older posts of the highlighted subscription.
+
+        Fixed default of 50 posts so a press doesn't accidentally pull
+        a decade-long archive. For more or less, use `pulp backfill` from
+        the shell with `--posts N` (or 0 for unlimited).
+        """
+        table = self.query_one(DataTable)
+        row = table.cursor_row
+        if row is None or row >= len(self._subs):
+            return
+        sub = self._subs[row]
+        self.notify(
+            f"backfilling up to {_BACKFILL_DEFAULT_POSTS} older posts of {sub.name!r}...",
+            timeout=4,
+        )
+        self._do_backfill(sub)
+
+    @work(thread=True, exclusive=True, group="backfill")
+    def _do_backfill(self, sub: Subscription) -> None:
+        """Runs in a worker thread - backfill is network-bound and can take a while."""
+        try:
+            report = pipeline.backfill(sub, max_new=_BACKFILL_DEFAULT_POSTS)
+        except pipeline.BackfillUnsupported as exc:
+            self.app.call_from_thread(
+                self.app.notify,
+                str(exc),
+                severity="warning",
+                timeout=8,
+            )
+            return
+        except Exception as exc:
+            self.app.call_from_thread(
+                self.app.notify,
+                f"backfill failed: {type(exc).__name__}: {exc}",
+                severity="error",
+                timeout=8,
+            )
+            return
+
+        bits = [f"+{report.new_items} from {sub.name}"]
+        if report.skipped_already_ingested:
+            bits.append(f"{report.skipped_already_ingested} dedup'd")
+        if report.errors:
+            bits.append(f"{report.errors} err")
+        bits.append(f"(stopped: {report.stopped_reason})")
+        self.app.call_from_thread(
+            self.app.notify,
+            ", ".join(bits),
+            severity="information",
+            timeout=6,
+        )
+        # Refresh DataTable in the UI thread so item-count column reflects the new arrivals.
+        self.app.call_from_thread(self.refresh_data)
 
 
 def _short_iso(iso: str) -> str:

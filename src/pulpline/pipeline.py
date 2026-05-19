@@ -286,6 +286,162 @@ def _sync_with_source(
 
 
 @dataclass(frozen=True, slots=True)
+class BackfillReport:
+    """Result of a `backfill` run. Mirrors SyncReport but counts pages walked."""
+
+    name: str
+    new_items: int
+    skipped_already_ingested: int
+    errors: int
+    pages_walked: int
+    stopped_reason: str  # 'max_new', 'since', 'exhausted', 'unsupported'
+    error_messages: tuple[str, ...] = ()
+
+
+class BackfillUnsupported(Exception):  # noqa: N818
+    """Raised when the requested subscription's source can't paginate backwards.
+
+    Kept Suffix-free for readability at call sites - this is a control-flow
+    signal callers consume with try/except, not a recoverable error class.
+    """
+
+
+def backfill(
+    sub: Subscription,
+    config: Config | None = None,
+    state_path: Path | None = None,
+    client: httpx.Client | None = None,
+    *,
+    max_new: int | None = 50,
+    since_iso: str | None = None,
+) -> BackfillReport:
+    """Walk a subscription's archive backwards, ingesting older posts.
+
+    Unlike `sync`, which only looks at the newest page, this paginates as
+    deep as the source supports. Stop conditions:
+      - `max_new`: stop after N successful ingestions (None = unlimited)
+      - `since_iso`: stop when a post's pub_date is older than this date
+      - Source's pagination exhausted (API returns empty page)
+
+    Already-ingested items (including soft-deleted ones) are skipped via
+    the dedup ledger but don't stop the walk - we keep going past them
+    to catch sparse holes in the existing data.
+
+    Raises `BackfillUnsupported` if the source doesn't implement
+    `discover_backwards`. Currently only SubstackSource does.
+    """
+    cfg = config or load_config()
+    try:
+        source_cls = get_source(sub.source)
+    except ValueError as exc:
+        raise BackfillUnsupported(str(exc)) from exc
+
+    with (
+        connect(state_path) as conn,
+        source_cls.from_config(cfg, client=client, subscription=sub) as source,
+    ):
+        if not hasattr(source, "discover_backwards"):
+            raise BackfillUnsupported(
+                f"source {sub.source!r} doesn't support backfill yet "
+                "(only Substack publications do for now)"
+            )
+        return _backfill_with_source(sub, cfg, conn, source, max_new=max_new, since_iso=since_iso)
+
+
+def _backfill_with_source(
+    sub: Subscription,
+    cfg: Config,
+    conn: sqlite3.Connection,
+    source: Source,
+    *,
+    max_new: int | None,
+    since_iso: str | None,
+) -> BackfillReport:
+    output_dir = cfg.output_dir_for(sub)
+    sink = FilesystemSink(output_dir)
+
+    new_items = 0
+    skipped = 0
+    errors = 0
+    pages_walked = 0
+    error_msgs: list[str] = []
+    stopped_reason = "exhausted"
+
+    # discover_backwards yields one ref at a time but fetches pages of N
+    # under the hood; we count pages by tracking when we cross page
+    # boundaries via the ref-counter.
+    seen_refs = 0
+    page_size = 25  # mirrors _DISCOVER_LIMIT in substack source
+
+    refs_iter = source.discover_backwards(sub.url)  # type: ignore[attr-defined]
+    for ref in refs_iter:
+        seen_refs += 1
+        if seen_refs % page_size == 1:
+            pages_walked += 1
+
+        # Date floor: refs come newest-first, so once we see a pub_date
+        # before the floor we know everything after is older too.
+        if since_iso and ref.pub_date is not None:
+            ref_iso = ref.pub_date.isoformat()
+            if ref_iso < since_iso:
+                stopped_reason = "since"
+                break
+
+        key = dedup_key(ref.url)
+        if was_ingested(conn, key):
+            skipped += 1
+            continue
+
+        try:
+            article = source.fetch(ref)
+            article = replace(article, subscription_name=sub.name)
+            content = source.render(article)
+            path = sink.write(article, content, source.extension)
+            record_item(
+                conn,
+                ItemRecord(
+                    subscription_name=sub.name,
+                    source_url=sub.url,
+                    dedup_key=key,
+                    canonical_url=article.canonical_url,
+                    title=article.title,
+                    pub_date=_iso_or_none(article.pub_date),
+                    output_path=str(path),
+                ),
+            )
+            new_items += 1
+        except Paywalled as exc:
+            _log.info("backfill %s paywalled url=%s host=%s", sub.name, ref.url, exc.host)
+        except (FetchError, ExtractionError) as exc:
+            _log.warning("backfill %s item failed url=%s err=%s", sub.name, ref.url, exc)
+            errors += 1
+            error_msgs.append(f"{ref.url}: {exc}")
+
+        if max_new is not None and new_items >= max_new:
+            stopped_reason = "max_new"
+            break
+
+    _log.info(
+        "backfill %s done: new=%d skipped=%d errors=%d pages=%d stopped=%s",
+        sub.name,
+        new_items,
+        skipped,
+        errors,
+        pages_walked,
+        stopped_reason,
+    )
+    return BackfillReport(
+        name=sub.name,
+        new_items=new_items,
+        skipped_already_ingested=skipped,
+        errors=errors,
+        pages_walked=pages_walked,
+        stopped_reason=stopped_reason,
+        error_messages=tuple(error_msgs),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class MigrationReport:
     moved: int
     skipped_already_correct: int

@@ -82,25 +82,52 @@ class SubstackSource(Source):
 
     def discover(self, target_url: str) -> Iterable[ItemRef]:
         self._publication_url = target_url.rstrip("/")
+        posts = self._archive_page(offset=0, limit=_DISCOVER_LIMIT)
+        yield from _yield_post_refs(posts)
+
+    def discover_backwards(self, target_url: str) -> Iterable[ItemRef]:
+        """Walk the publication's archive backwards via the `offset` param.
+
+        Yields refs newest-first across the whole archive. Stops when the
+        API returns an empty page (we've reached the oldest post). The
+        caller is responsible for applying stop conditions (post count,
+        date floor, dedup hit) - this method just keeps paginating.
+
+        Each page is _DISCOVER_LIMIT items; we cap there because Substack
+        rejects limit>50 with a 400. Going page-by-page keeps memory flat
+        regardless of archive size and lets the caller break the iterator
+        as soon as it's seen enough.
+        """
+        self._publication_url = target_url.rstrip("/")
+        offset = 0
+        while True:
+            posts = self._archive_page(offset=offset, limit=_DISCOVER_LIMIT)
+            if not posts:
+                return
+            yielded_this_page = 0
+            for ref in _yield_post_refs(posts):
+                yielded_this_page += 1
+                yield ref
+            offset += yielded_this_page or len(posts)
+
+    def _archive_page(self, *, offset: int, limit: int) -> list[Any]:
+        """Fetch one page of the publication archive. Returns post dicts."""
         endpoint = f"{self._publication_url}/api/v1/archive"
+        params: dict[str, str] = {"sort": "new", "limit": str(limit)}
+        if offset:
+            params["offset"] = str(offset)
         try:
-            response = self.client.get(
-                endpoint,
-                params={"sort": "new", "limit": str(_DISCOVER_LIMIT)},
-            )
+            response = self.client.get(endpoint, params=params)
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise FetchError(f"failed to list archive {endpoint}: {exc}") from exc
-
         try:
             posts = response.json()
         except ValueError as exc:
             raise ExtractionError(f"archive {endpoint} did not return JSON") from exc
-
         if not isinstance(posts, list):
             raise ExtractionError(f"archive {endpoint} returned non-list")
-
-        yield from _yield_post_refs(posts)
+        return posts
 
     def fetch(self, ref: ItemRef) -> RawArticle:
         # Some saved posts come back with a Substack-reader canonical URL

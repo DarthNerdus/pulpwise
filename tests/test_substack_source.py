@@ -131,6 +131,60 @@ def test_from_config_no_cookies_when_not_configured() -> None:
     assert source._cookies is None
 
 
+def test_discover_backwards_paginates_via_offset_until_empty_page() -> None:
+    """discover_backwards walks offset=0, 25, 50, ... until the archive returns []."""
+    base = "https://samkriss.substack.com"
+
+    # Three full pages of distinct posts, then an empty page that should stop iteration.
+    def page(start: int, count: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": start + i,
+                "canonical_url": f"{base}/p/post-{start + i}",
+                "title": f"Post {start + i}",
+                "post_date": f"2026-04-{30 - (start + i):02d}T12:00:00.000Z",
+            }
+            for i in range(count)
+        ]
+
+    pages_by_offset: dict[str, list[dict[str, Any]]] = {
+        "": page(1, 25),  # offset omitted -> first page
+        "0": page(1, 25),
+        "25": page(26, 25),
+        "50": page(51, 5),  # partial page
+        "55": [],  # exhausted
+    }
+    seen_offsets: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/api/v1/archive":
+            return httpx.Response(404)
+        offset = request.url.params.get("offset", "")
+        seen_offsets.append(offset)
+        return httpx.Response(200, json=pages_by_offset.get(offset, []))
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with SubstackSource(client=client) as source:
+        refs = list(source.discover_backwards(base))
+
+    # 25 + 25 + 5 = 55 refs across 4 requests (including the terminating empty page).
+    assert len(refs) == 55
+    # First page may use empty offset or "0"; subsequent must use offset.
+    assert any(o in {"", "0"} for o in seen_offsets[:1])
+    assert "25" in seen_offsets
+    assert "50" in seen_offsets
+    assert "55" in seen_offsets  # the empty page that stops the loop
+
+
+def test_discover_backwards_stops_immediately_on_empty_first_page() -> None:
+    """A publication with zero posts returns [] right away; iterator must terminate."""
+    base = "https://empty.substack.com"
+    client = _routed_client({f"{base}/api/v1/archive": []})
+    with SubstackSource(client=client) as source:
+        refs = list(source.discover_backwards(base))
+    assert refs == []
+
+
 def test_cookies_threaded_through_to_request() -> None:
     """Verify cookies actually reach the API call."""
     base = "https://samkriss.substack.com"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
@@ -511,6 +512,71 @@ def tui() -> None:
     from pulpline.tui.app import run
 
     run()
+
+
+@app.command()
+def backfill(
+    name: str = typer.Argument(..., help="Subscription name to backfill."),
+    posts: int = typer.Option(
+        50,
+        "--posts",
+        "-n",
+        help="Stop after this many newly-ingested posts. Pass 0 for unlimited "
+        "(walks until the publication's archive is exhausted).",
+    ),
+    since: str | None = typer.Option(
+        None,
+        "--since",
+        help="Stop when a post's pub_date is older than YYYY-MM-DD. "
+        "Combine with --posts as belt-and-suspenders bounds.",
+    ),
+) -> None:
+    """Pull older posts of a subscription by paginating its archive.
+
+    Regular `pulp sync` only looks at the newest page (~25 posts) per
+    subscription. `backfill` keeps paginating backwards via the source's
+    archive endpoint until one of the stop conditions fires.
+
+    Already-ingested items are skipped (they don't count against --posts)
+    but the walk continues past them, so partially-populated subscriptions
+    get their gaps filled in too.
+
+    Currently only Substack publications support backfill. RSS feeds can't
+    be paginated (the feed only serves what it serves); arXiv backfill is
+    done by editing the query URL itself.
+    """
+    config = load_config()
+    sub = config.find(name)
+    if sub is None:
+        typer.echo(f"no subscription named {name!r}.", err=True)
+        raise typer.Exit(code=2)
+
+    since_iso: str | None = None
+    if since is not None:
+        try:
+            # Accept YYYY-MM-DD; expand to a full ISO timestamp so string
+            # comparison with pub_date.isoformat() does the right thing.
+            since_iso = datetime.strptime(since, "%Y-%m-%d").replace(tzinfo=UTC).isoformat()
+        except ValueError as exc:
+            typer.echo(f"invalid --since date: {exc}", err=True)
+            raise typer.Exit(code=2) from exc
+
+    max_new: int | None = posts if posts > 0 else None
+
+    try:
+        report = pipeline.backfill(sub, config=config, max_new=max_new, since_iso=since_iso)
+    except pipeline.BackfillUnsupported as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    bits = [f"backfilled {report.new_items} post(s)"]
+    if report.skipped_already_ingested:
+        bits.append(f"{report.skipped_already_ingested} already in ledger")
+    if report.errors:
+        bits.append(f"{report.errors} error(s)")
+    bits.append(f"pages walked: {report.pages_walked}")
+    bits.append(f"stopped: {report.stopped_reason}")
+    typer.echo("; ".join(bits))
 
 
 @app.command()
