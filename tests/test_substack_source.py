@@ -131,6 +131,48 @@ def test_from_config_no_cookies_when_not_configured() -> None:
     assert source._cookies is None
 
 
+def test_fetch_resolves_cross_post_url_via_by_id_endpoint() -> None:
+    """A `<pub>/cp/<id>` cross-post URL routes through /api/v1/posts/by-id/<id>,
+    same as the home-post case but originating from a regular subscription
+    sync rather than the saves feed."""
+    cp_url = "https://samkriss.substack.com/cp/189381253"
+    by_id = "https://substack.com/api/v1/posts/by-id/189381253"
+    resolved_post = "https://samkriss.substack.com/api/v1/posts/childs-play"
+
+    routes: dict[str, Any] = {
+        by_id: {
+            "post": {
+                "id": 189381253,
+                "slug": "childs-play",
+                "canonical_url": cp_url,
+            },
+            "publication": {
+                "subdomain": "samkriss",
+                "custom_domain": None,
+            },
+        },
+        resolved_post: {
+            "title": "Child's Play",
+            "canonical_url": "https://samkriss.substack.com/p/childs-play",
+            "body_html": "<p>body</p>",
+            "audience": "everyone",
+            "post_date": "2026-02-27T12:00:00.000Z",
+            "publishedBylines": [{"name": "Sam Kriss"}],
+            "publication": {"name": "Numb at the Lodge"},
+        },
+    }
+
+    with SubstackSource(
+        client=_routed_client(routes),
+        cookies=[CookieEntry(name="session", value="x", domain=".substack.com")],
+    ) as source:
+        article = source.fetch(ItemRef(url=cp_url))
+
+    assert article.title == "Child's Play"
+    assert article.body_html == "<p>body</p>"
+    assert article.author == "Sam Kriss"
+
+
 def test_discover_backwards_paginates_via_offset_until_empty_page() -> None:
     """discover_backwards walks offset=0, 25, 50, ... until the archive returns []."""
     base = "https://samkriss.substack.com"

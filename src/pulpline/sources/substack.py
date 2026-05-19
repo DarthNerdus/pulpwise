@@ -49,6 +49,11 @@ _SAVED_API = "https://substack.com/api/v1/reader/posts"
 # narrowed.
 _SAVED_DISCOVER_LIMIT = 20
 _HOME_POST_RX = re.compile(r"^/home/post/p-(\d+)/?$")
+# Cross-post URL pattern: when a Substack publication cross-posts an article
+# from another publication, the link uses /cp/<post_id> rather than /p/<slug>.
+# Like the home/post case, the standard /api/v1/posts/<slug> endpoint can't
+# resolve it (the path segment is an id, not a slug); we route via by-id.
+_CROSS_POST_RX = re.compile(r"^/cp/(\d+)/?$")
 
 
 class SubstackSource(Source):
@@ -130,16 +135,18 @@ class SubstackSource(Source):
         return posts
 
     def fetch(self, ref: ItemRef) -> RawArticle:
-        # Some saved posts come back with a Substack-reader canonical URL
-        # like `https://substack.com/home/post/p-<id>` instead of the
-        # publication's own per-post URL. Those don't resolve via the
-        # standard /api/v1/posts/<slug> path. Resolve via posts/by-id to
-        # discover the publication's subdomain + the post's slug, then
-        # proceed normally.
+        # Two URL shapes carry a post *id* instead of a slug, so they can't
+        # hit /api/v1/posts/<slug> directly:
+        #   - `substack.com/home/post/p-<id>` (Substack-reader canonical for
+        #     some saved posts)
+        #   - `<pub>/cp/<id>` (a cross-post from another publication)
+        # Both resolve via /api/v1/posts/by-id/<id>, which returns the
+        # owning publication's subdomain + the post's slug; we then build
+        # the canonical /p/<slug> URL and proceed normally.
         fetch_url = ref.url
-        home_post_id = _home_post_id(fetch_url)
-        if home_post_id is not None:
-            resolved = self._resolve_home_post(home_post_id)
+        post_id = _home_post_id(fetch_url) or _cross_post_id(fetch_url)
+        if post_id is not None:
+            resolved = self._resolve_post_by_id(post_id)
             if resolved is None:
                 raise ExtractionError(
                     f"could not resolve {ref.url}: post may be deleted "
@@ -195,8 +202,14 @@ class SubstackSource(Source):
             language="en",
         )
 
-    def _resolve_home_post(self, post_id: str) -> str | None:
-        """Resolve `substack.com/home/post/p-<id>` to the publication's URL.
+    def _resolve_post_by_id(self, post_id: str) -> str | None:
+        """Resolve an id-bearing URL to the canonical /p/<slug> URL.
+
+        Used for both `substack.com/home/post/p-<id>` (Substack reader's
+        canonical for some saved posts) and `<pub>/cp/<id>` (cross-posts
+        from another publication). Both shapes carry a post id where the
+        slug would normally be; the standard /api/v1/posts/<slug> endpoint
+        doesn't accept ids.
 
         Hits `/api/v1/posts/by-id/<id>`, reads `publication.subdomain` (or
         `custom_domain`) and `post.slug`, returns the per-publication URL.
@@ -415,6 +428,18 @@ def _home_post_id(url: str) -> str | None:
     if (parts.hostname or "").lower() not in _SAVED_HOSTS:
         return None
     match = _HOME_POST_RX.match(parts.path)
+    return match.group(1) if match else None
+
+
+def _cross_post_id(url: str) -> str | None:
+    """Return the post id if `url` is a `<pub>/cp/<id>` cross-post URL.
+
+    Cross-posts can live on any Substack publication domain (custom or
+    subdomain), so we don't restrict by hostname here - we just match the
+    path shape. Combined with the regex's anchoring this is unambiguous.
+    """
+    parts = urlsplit(url)
+    match = _CROSS_POST_RX.match(parts.path)
     return match.group(1) if match else None
 
 
