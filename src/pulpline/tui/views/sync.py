@@ -53,6 +53,7 @@ class _SubRun:
     skipped: int = 0
     errors: int = 0
     paywalled: int = 0
+    error_messages: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -167,6 +168,7 @@ class SyncView(View):
         sub.skipped = report.skipped
         sub.errors = report.errors
         sub.paywalled = len(report.paywalled)
+        sub.error_messages = report.error_messages
         sub.current = ""
         self._render_pulpline()
 
@@ -204,13 +206,46 @@ class SyncView(View):
         text.append("\n\n")
 
         name_w = max((len(sub.name) for sub in config.subscriptions), default=0)
+        # Width of the row-marker (a single styled char) plus its leading/
+        # trailing spaces and the name column - used to indent error lines so
+        # they hang under the sub name rather than under the marker.
+        indent_w = 2 + 1 + 2 + name_w + 2
         for sub in config.subscriptions:
             text.append("  ")
             text.append_text(self._row_marker(sub, states.get(sub.name)))
             text.append(f"  {sub.name:<{name_w}}  ")
             text.append_text(self._row_status(sub, states.get(sub.name)))
             text.append("\n")
+            for line in self._error_lines(sub, states.get(sub.name)):
+                text.append(" " * indent_w)
+                text.append_text(line)
+                text.append("\n")
         return text
+
+    def _error_lines(self, sub: Subscription, state: SubscriptionState | None) -> list[Text]:
+        """Indented error detail lines for a sub, or [] when nothing to show.
+
+        During a run, prefer the in-flight `error_messages` from the current
+        report (most accurate). When idle, fall back to the persisted
+        `last_error` on subscription_state so yesterday's failure is still
+        visible after pulpline restarts.
+        """
+        run = self._run.subs.get(sub.name)
+        messages: tuple[str, ...] = ()
+        if run is not None and run.finished and run.error_messages:
+            messages = run.error_messages
+        elif state and state.last_error and not (run and run.finished):
+            messages = (state.last_error,)
+        if not messages:
+            return []
+        # Cap at 3 per row so a sub with 20 broken posts doesn't push everything
+        # else off-screen; full list lives in the log file.
+        out: list[Text] = []
+        for msg in messages[:3]:
+            out.append(Text(f"└─ {_truncate(msg, 100)}", style="red"))
+        if len(messages) > 3:
+            out.append(Text(f"   ... and {len(messages) - 3} more (see log)", style="dim red"))
+        return out
 
     def _summary_chips(
         self,
@@ -328,6 +363,14 @@ class _TuiProgress(ProgressReporter):
 
     def subscription_finished(self, name: str, report: SyncReport) -> None:
         self._view.app.call_from_thread(self._view._on_sub_finished, name, report)
+
+
+def _truncate(text: str, max_len: int) -> str:
+    """Single-line, length-capped rendering for inline error display."""
+    flat = text.replace("\n", " ").strip()
+    if len(flat) <= max_len:
+        return flat
+    return flat[: max_len - 1] + "…"
 
 
 def _last_status(state: SubscriptionState | None) -> str | None:
