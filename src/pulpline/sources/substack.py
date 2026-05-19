@@ -260,6 +260,17 @@ class SubstackSavedSource(SubstackSource):
                 f"saved-posts endpoint returned unexpected shape: {type(payload).__name__}"
             )
 
+        # The reader endpoint with bucket=saved returns mixed content: the
+        # user's actual saves PLUS recommendations / new posts from
+        # publications they follow. Only items whose post_id appears in
+        # `savedPosts` are real saves. When the savedPosts array is present
+        # in the payload we use it to filter; if absent (legacy / alternate
+        # shape) we fall back to trusting the full `posts` array.
+        if isinstance(payload, dict) and "savedPosts" in payload:
+            saved_ids = _extract_saved_post_ids(payload["savedPosts"])
+            if saved_ids is not None:
+                posts = [p for p in posts if isinstance(p, dict) and p.get("id") in saved_ids]
+
         yield from _yield_post_refs(posts)
 
     def fetch(self, ref: ItemRef) -> RawArticle:
@@ -310,6 +321,26 @@ def _unwrap_post_list(payload: object) -> list[Any] | None:
             if isinstance(inner, list):
                 return inner
     return None
+
+
+def _extract_saved_post_ids(saved_posts: object) -> set[int] | None:
+    """Pull post_id values out of the savedPosts join-table array.
+
+    The reader endpoint returns `savedPosts: [{user_id, post_id, created_at}]`
+    alongside the mixed `posts` array; intersecting on post_id is what
+    separates real saves from recommendations.
+
+    Returns None when the input shape is unrecognized (caller will then
+    treat all posts as saves - the legacy behavior). Returns a possibly
+    empty set when the shape is valid; the caller's filter handles that.
+    """
+    if not isinstance(saved_posts, list):
+        return None
+    ids: set[int] = set()
+    for entry in saved_posts:
+        if isinstance(entry, dict) and isinstance(entry.get("post_id"), int):
+            ids.add(entry["post_id"])
+    return ids
 
 
 def _yield_post_refs(posts: list[Any]) -> Iterable[ItemRef]:

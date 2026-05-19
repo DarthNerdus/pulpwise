@@ -194,6 +194,61 @@ def test_discover_raises_on_http_failure() -> None:
         list(source.discover(SAVES_URL))
 
 
+def test_discover_filters_posts_by_saved_post_ids() -> None:
+    """The reader endpoint mixes real saves with recommendations. We must
+    intersect `posts` with the `savedPosts.post_id` set so non-saved items
+    (new posts from publications you follow, recs, etc.) don't get
+    ingested into the saves bucket."""
+    real_save = {**_post("kept", "Real Save", 1001)}
+    leaked_rec = {**_post("leaked", "Recommendation Leak", 9999)}
+    payload = {
+        "posts": [real_save, leaked_rec],
+        "savedPosts": [
+            {"user_id": 1, "post_id": 1001, "created_at": "2026-05-19T11:00:00.000Z"},
+        ],
+    }
+    client = _routed_client({SAVES_API: payload})
+    with SubstackSavedSource(
+        client=client,
+        cookies=[CookieEntry(name="session", value="x", domain=".substack.com")],
+    ) as source:
+        refs = list(source.discover(SAVES_URL))
+
+    # Only id=1001 is in savedPosts; id=9999 must be filtered out.
+    assert [r.guid for r in refs] == ["1001"]
+    assert [r.title for r in refs] == ["Real Save"]
+
+
+def test_discover_falls_back_to_all_posts_when_saved_posts_key_missing() -> None:
+    """Legacy / alternate response shapes don't carry `savedPosts`. In that
+    case the filter is a no-op so we don't regress the old behavior."""
+    payload = {"posts": [_post("a", "Post A", 1), _post("b", "Post B", 2)]}
+    client = _routed_client({SAVES_API: payload})
+    with SubstackSavedSource(
+        client=client,
+        cookies=[CookieEntry(name="session", value="x", domain=".substack.com")],
+    ) as source:
+        refs = list(source.discover(SAVES_URL))
+    # No savedPosts key -> trust all posts.
+    assert {r.title for r in refs} == {"Post A", "Post B"}
+
+
+def test_discover_empty_saved_posts_array_yields_no_refs() -> None:
+    """When the user has zero saves, posts may still be non-empty (recs only)
+    but savedPosts is []. Nothing should be ingested."""
+    payload = {
+        "posts": [_post("a", "Recommendation", 1)],
+        "savedPosts": [],
+    }
+    client = _routed_client({SAVES_API: payload})
+    with SubstackSavedSource(
+        client=client,
+        cookies=[CookieEntry(name="session", value="x", domain=".substack.com")],
+    ) as source:
+        refs = list(source.discover(SAVES_URL))
+    assert refs == []
+
+
 def test_discover_sends_bucket_saved_query_param() -> None:
     """Pin the contract with Substack's reader endpoint: bucket=saved must be in the
     query. The endpoint serves multiple buckets; without bucket=saved we'd get
