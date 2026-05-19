@@ -6,7 +6,10 @@ from typing import ClassVar
 
 from textual import work
 from textual.app import ComposeResult
-from textual.widgets import DataTable, Static
+from textual.binding import BindingType
+from textual.containers import Vertical
+from textual.screen import ModalScreen
+from textual.widgets import DataTable, Input, Label, Static
 
 from pulpline import pipeline
 from pulpline.config import (
@@ -25,6 +28,71 @@ from pulpline.state import (
 from pulpline.tui.views.base import View
 
 _BACKFILL_DEFAULT_POSTS = 50
+
+
+class BackfillPromptScreen(ModalScreen[int | None]):
+    """Asks how many older posts to fetch. Returns the count, or None on cancel.
+
+    Pre-fills with the last sensible default so a quick Enter accepts;
+    typing a different number overrides. 0 means 'walk the whole archive'.
+    """
+
+    DEFAULT_CSS = """
+    BackfillPromptScreen {
+        align: center middle;
+    }
+    BackfillPromptScreen > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 60;
+        height: auto;
+    }
+    BackfillPromptScreen Label {
+        padding: 0 0 1 0;
+    }
+    BackfillPromptScreen #backfill-hint {
+        color: $text-muted;
+        padding: 1 0 0 0;
+    }
+    """
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        ("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, sub_name: str, default_count: int = _BACKFILL_DEFAULT_POSTS) -> None:
+        super().__init__()
+        self._sub_name = sub_name
+        self._default = default_count
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label(f"Backfill {self._sub_name!r}: how many older posts?")
+            yield Input(value=str(self._default), id="backfill-count")
+            yield Label("Enter to confirm  ·  Esc to cancel  ·  0 = unlimited", id="backfill-hint")
+
+    def on_mount(self) -> None:
+        # Focus the input and put the cursor at the end so backspace clears
+        # the default if the user wants to type a different number.
+        count_input = self.query_one("#backfill-count", Input)
+        count_input.focus()
+        count_input.action_end()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        raw = event.value.strip()
+        try:
+            count = int(raw)
+        except ValueError:
+            self.notify(f"not a number: {raw!r}", severity="warning")
+            return
+        if count < 0:
+            self.notify("count must be 0 or higher", severity="warning")
+            return
+        self.dismiss(count)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class SubscriptionsView(View):
@@ -136,28 +204,31 @@ class SubscriptionsView(View):
         self.notify(f"removed {sub.name!r}", severity="information")
 
     def action_backfill_selected(self) -> None:
-        """Pull older posts of the highlighted subscription.
-
-        Fixed default of 50 posts so a press doesn't accidentally pull
-        a decade-long archive. For more or less, use `pulp backfill` from
-        the shell with `--posts N` (or 0 for unlimited).
-        """
+        """Open a modal asking how many older posts to fetch, then run."""
         table = self.query_one(DataTable)
         row = table.cursor_row
         if row is None or row >= len(self._subs):
             return
         sub = self._subs[row]
-        self.notify(
-            f"backfilling up to {_BACKFILL_DEFAULT_POSTS} older posts of {sub.name!r}...",
-            timeout=4,
-        )
-        self._do_backfill(sub)
+
+        def on_count(count: int | None) -> None:
+            if count is None:
+                return  # user pressed Esc
+            max_new = count if count > 0 else None
+            label = "unlimited" if max_new is None else f"up to {max_new}"
+            self.notify(
+                f"backfilling {label} older posts of {sub.name!r}...",
+                timeout=4,
+            )
+            self._do_backfill(sub, max_new)
+
+        self.app.push_screen(BackfillPromptScreen(sub.name), on_count)
 
     @work(thread=True, exclusive=True, group="backfill")
-    def _do_backfill(self, sub: Subscription) -> None:
+    def _do_backfill(self, sub: Subscription, max_new: int | None) -> None:
         """Runs in a worker thread - backfill is network-bound and can take a while."""
         try:
-            report = pipeline.backfill(sub, max_new=_BACKFILL_DEFAULT_POSTS)
+            report = pipeline.backfill(sub, max_new=max_new)
         except pipeline.BackfillUnsupported as exc:
             self.app.call_from_thread(
                 self.app.notify,
