@@ -246,20 +246,55 @@ class SubscriptionsView(View):
             )
             return
 
-        bits = [f"+{report.new_items} from {sub.name}"]
-        if report.skipped_already_ingested:
-            bits.append(f"{report.skipped_already_ingested} dedup'd")
-        if report.errors:
-            bits.append(f"{report.errors} err")
-        bits.append(f"(stopped: {report.stopped_reason})")
+        message, severity = _backfill_outcome_message(sub.name, report)
         self.app.call_from_thread(
             self.app.notify,
-            ", ".join(bits),
-            severity="information",
-            timeout=6,
+            message,
+            severity=severity,
+            timeout=8,
         )
         # Refresh DataTable in the UI thread so item-count column reflects the new arrivals.
         self.app.call_from_thread(self.refresh_data)
+
+
+def _backfill_outcome_message(
+    sub_name: str, report: pipeline.BackfillReport
+) -> tuple[str, str]:
+    """Turn a BackfillReport into a Telegram-grade one-liner + severity.
+
+    The three outcomes that matter to the user, in priority order:
+
+      1. 'nothing to add' (new=0, exhausted): the user asked for posts but
+         the publication's archive is fully drained. Be loud about this so
+         they don't think it's a bug.
+      2. 'partial - more available' (new>0, max_new): the limit fired before
+         the archive ran out. There's more if you want it.
+      3. 'partial - fully drained' (new>0, exhausted): the user got the
+         remaining posts; the archive has nothing left.
+
+    The 'since' case is rare in the TUI (no date prompt in the modal yet)
+    so it falls back to a generic message.
+    """
+    base_count = report.skipped_already_ingested + report.new_items
+    if report.new_items == 0 and report.stopped_reason == "exhausted":
+        return (
+            f"{sub_name}: nothing more to fetch - "
+            f"full archive ({base_count} posts) already ingested",
+            "information",
+        )
+
+    bits = [f"+{report.new_items} from {sub_name}"]
+    if report.stopped_reason == "max_new":
+        bits.append("archive has more (raise --posts to get them)")
+    elif report.stopped_reason == "exhausted":
+        bits.append(f"full archive now ingested ({base_count} posts)")
+    elif report.stopped_reason == "since":
+        bits.append("stopped at --since date")
+
+    if report.errors:
+        bits.append(f"{report.errors} error(s)")
+    severity = "warning" if report.errors else "information"
+    return ", ".join(bits), severity
 
 
 def _short_iso(iso: str) -> str:

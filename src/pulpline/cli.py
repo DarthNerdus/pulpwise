@@ -569,13 +569,24 @@ def backfill(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
 
+    base_count = report.skipped_already_ingested + report.new_items
+    if report.new_items == 0 and report.stopped_reason == "exhausted":
+        typer.echo(
+            f"nothing more to fetch - full archive ({base_count} posts) already ingested"
+        )
+        return
     bits = [f"backfilled {report.new_items} post(s)"]
     if report.skipped_already_ingested:
         bits.append(f"{report.skipped_already_ingested} already in ledger")
     if report.errors:
         bits.append(f"{report.errors} error(s)")
     bits.append(f"pages walked: {report.pages_walked}")
-    bits.append(f"stopped: {report.stopped_reason}")
+    if report.stopped_reason == "max_new":
+        bits.append("stopped at --posts limit (archive has more; raise --posts to get them)")
+    elif report.stopped_reason == "exhausted":
+        bits.append(f"full archive now ingested ({base_count} posts)")
+    elif report.stopped_reason == "since":
+        bits.append("stopped at --since date")
     typer.echo("; ".join(bits))
 
 
