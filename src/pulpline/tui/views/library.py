@@ -99,14 +99,15 @@ class LibraryView(View):
             groups[bucket].append(item)
 
         tree: Tree[LibraryItem] = self.query_one(Tree)
-        # Tree.clear() drops collapse state, so snapshot which buckets the
-        # user had collapsed and re-apply after rebuild. Otherwise actions
-        # like delete (which trigger a full refresh) silently re-expand
-        # everything.
-        collapsed_buckets = {
+        # Tree.clear() drops expand state, so snapshot which buckets the
+        # user had expanded and re-apply after rebuild. New buckets default
+        # to collapsed - the user explicitly asked for that; long lists
+        # like 'substack-saves' clutter the view otherwise. Manually-
+        # expanded buckets stay expanded across refresh/delete actions.
+        expanded_buckets = {
             _bucket_from_label(str(node.label))
             for node in tree.root.children
-            if not node.is_expanded
+            if node.is_expanded
         }
         tree.clear()
         if not groups:
@@ -125,7 +126,7 @@ class LibraryView(View):
             heading = f"[deleted] {bucket}" if self._show_deleted else bucket
             group_node: TreeNode[LibraryItem] = tree.root.add(
                 f"{heading}  {count_label}",
-                expand=bucket not in collapsed_buckets,
+                expand=bucket in expanded_buckets,
             )
             for item in bucket_items:
                 # Deleted-mode rows lead with the deletion date (when we
