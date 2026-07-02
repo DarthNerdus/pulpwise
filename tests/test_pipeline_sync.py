@@ -10,6 +10,8 @@ import httpx
 from pulpline import pipeline
 from pulpline.config import Config, Subscription
 from pulpline.state import connect, is_seen
+from pulpline.util.http import RetryTransport, _RateLimitState
+from tests.conftest import FakeTimer
 
 ClientFactory = Callable[[dict[str, str]], httpx.Client]
 
@@ -133,3 +135,202 @@ def test_add_once_is_idempotent_via_dedup(
     assert first == second
     # The article was written exactly once - in the oneshots subfolder.
     assert len(list((tmp_path / "oneshots").glob("*.epub"))) == 1
+
+
+# ---- rate-limit behavior (RetryTransport wired in, like production clients) ----
+
+
+def _retry_client(
+    handler: Callable[[httpx.Request], httpx.Response],
+    timer: FakeTimer,
+    scope: str | None = None,
+) -> httpx.Client:
+    """Mock-backed client with the same retry layer `build_client` installs."""
+    transport = RetryTransport(
+        httpx.MockTransport(handler),
+        scope=scope,
+        state=_RateLimitState(clock=timer.clock),
+        sleep=timer.sleep,
+    )
+    return httpx.Client(transport=transport)
+
+
+def _teaser_feed(feed_path: str, article_urls: list[str]) -> str:
+    """RSS feed whose items carry only teasers, forcing per-article fetches."""
+    items = "".join(
+        f"<item><title>Post {i}</title><link>{url}</link>"
+        f"<description>teaser only</description></item>"
+        for i, url in enumerate(article_urls)
+    )
+    return (
+        '<?xml version="1.0"?><rss version="2.0"><channel>'
+        f"<title>RL Feed</title><link>https://pub.example.com{feed_path}</link>"
+        f"{items}</channel></rss>"
+    )
+
+
+def test_sync_stops_subscription_after_persistent_429(
+    tmp_path: Path, fake_timer: FakeTimer
+) -> None:
+    """One rate-limited item must not cascade into requests for the rest."""
+    articles = [f"https://pub.example.com/post-{i}" for i in range(3)]
+    feed_xml = _teaser_feed("/feed", articles)
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/feed":
+            return httpx.Response(200, text=feed_xml)
+        return httpx.Response(429)
+
+    client = _retry_client(handler, fake_timer)
+    config = Config(
+        subscriptions=(
+            Subscription(
+                name="pub",
+                source="rss",
+                url="https://pub.example.com/feed",
+                output_dir=str(tmp_path / "out"),
+            ),
+        )
+    )
+
+    total = pipeline.sync(config=config, client=client)
+
+    report = total.reports[0]
+    assert report.new_items == 0
+    assert report.errors == 1  # one rate-limit event, not one error per item
+    assert "3 item(s) deferred to the next sync run" in report.error_messages[0]
+    # Item 1 cost 5 requests (initial + 3 backoff retries + 1 post-cooldown
+    # attempt); items 2 and 3 cost zero.
+    article_requests = [r for r in requests if r.url.path != "/feed"]
+    assert len(article_requests) == 5
+    assert all(r.url.path == "/post-0" for r in article_requests)
+
+
+def test_sync_rate_limited_host_fails_fast_for_later_subscriptions(
+    tmp_path: Path, fake_timer: FakeTimer
+) -> None:
+    """After a host trips, other subscriptions on it make zero HTTP requests."""
+    feed_xml = _teaser_feed("/feed", ["https://pub.example.com/post-0"])
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/feed":
+            return httpx.Response(200, text=feed_xml)
+        return httpx.Response(429)
+
+    client = _retry_client(handler, fake_timer)
+    config = Config(
+        subscriptions=(
+            Subscription(
+                name="first",
+                source="rss",
+                url="https://pub.example.com/feed",
+                output_dir=str(tmp_path / "out"),
+            ),
+            Subscription(
+                name="second",
+                source="rss",
+                url="https://pub.example.com/feed2",
+                output_dir=str(tmp_path / "out"),
+            ),
+        )
+    )
+
+    total = pipeline.sync(config=config, client=client)
+
+    by_name = {r.name: r for r in total.reports}
+    assert by_name["first"].errors == 1
+    assert by_name["second"].errors == 1
+    assert "rate limited by pub.example.com" in by_name["second"].error_messages[0]
+    # The second subscription's feed was never requested.
+    assert not any(r.url.path == "/feed2" for r in requests)
+
+
+def test_backfill_stops_on_rate_limit(tmp_path: Path, fake_timer: FakeTimer) -> None:
+    archive = [
+        {
+            "id": i,
+            "title": f"Post {i}",
+            "canonical_url": f"https://pub.substack.com/p/post-{i}",
+            "post_date": f"2026-01-0{i + 1}T00:00:00Z",
+        }
+        for i in range(2)
+    ]
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/v1/archive":
+            return httpx.Response(200, json=archive)
+        return httpx.Response(429)
+
+    client = _retry_client(handler, fake_timer)
+    sub = Subscription(
+        name="pub",
+        source="substack",
+        url="https://pub.substack.com",
+        output_dir=str(tmp_path / "out"),
+    )
+
+    report = pipeline.backfill(sub, config=Config(subscriptions=(sub,)), client=client)
+
+    assert report.stopped_reason == "rate_limited"
+    assert report.errors == 1
+    assert report.new_items == 0
+    assert "rate limited by pub.substack.com" in report.error_messages[0]
+    # Only the first post burned requests; the walk stopped there.
+    post_requests = [r for r in requests if r.url.path.startswith("/api/v1/posts/")]
+    assert len(post_requests) == 5
+
+
+def test_sync_substack_scope_protects_other_publications(
+    tmp_path: Path, fake_timer: FakeTimer
+) -> None:
+    """One publication trips the shared `substack` bucket; the next
+    publication - a different hostname - is skipped with zero requests."""
+    archive = [
+        {
+            "id": 1,
+            "title": "Post",
+            "canonical_url": "https://foo.substack.com/p/post",
+            "post_date": "2026-01-01T00:00:00Z",
+        }
+    ]
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/v1/archive":
+            return httpx.Response(200, json=archive)
+        return httpx.Response(429)
+
+    client = _retry_client(handler, fake_timer, scope="substack")
+    config = Config(
+        subscriptions=(
+            Subscription(
+                name="foo",
+                source="substack",
+                url="https://foo.substack.com",
+                output_dir=str(tmp_path / "out"),
+            ),
+            Subscription(
+                name="bar",
+                source="substack",
+                url="https://bar.substack.com",
+                output_dir=str(tmp_path / "out"),
+            ),
+        )
+    )
+
+    total = pipeline.sync(config=config, client=client)
+
+    by_name = {r.name: r for r in total.reports}
+    assert by_name["foo"].errors == 1
+    assert by_name["bar"].errors == 1
+    assert "rate limited by substack" in by_name["bar"].error_messages[0]
+    # bar.substack.com was never contacted - the scope bucket, not the
+    # hostname, is what the breaker keys on.
+    assert not any(r.url.host == "bar.substack.com" for r in requests)

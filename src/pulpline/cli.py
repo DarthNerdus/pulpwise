@@ -30,7 +30,7 @@ from pulpline.importers.substack import (
     SubstackPublication,
     list_user_subscriptions,
 )
-from pulpline.models import ExtractionError, FetchError
+from pulpline.models import ExtractionError, FetchError, RateLimited
 from pulpline.sources import REGISTRY as _SOURCE_REGISTRY
 from pulpline.sources import pick_source_for_url
 from pulpline.sources.rss import RSSSource
@@ -587,6 +587,8 @@ def backfill(
         bits.append(f"full archive now ingested ({base_count} posts)")
     elif report.stopped_reason == "since":
         bits.append("stopped at --since date")
+    elif report.stopped_reason == "rate_limited":
+        bits.append("stopped early: rate limited (wait a bit, then re-run to continue)")
     typer.echo("; ".join(bits))
 
 
@@ -1060,10 +1062,10 @@ def import_substack(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
 
-    with build_client() as client:
+    with build_client(scope="substack") as client:
         try:
             pubs = list_user_subscriptions(resolved_username, cookie_dict, client)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, RateLimited) as exc:
             typer.echo(
                 f"failed to fetch subscriptions for {resolved_username!r}: {exc}",
                 err=True,

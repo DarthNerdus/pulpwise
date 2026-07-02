@@ -34,6 +34,17 @@ class Source(ABC):
     """File extension for items this source produces. Most sources emit EPUBs;
     binary-format sources (arXiv -> PDF, MangaDex -> CBZ) override this."""
 
+    rate_limit_scope: ClassVar[str | None] = None
+    """Shared rate-limit bucket for every request this source makes, or None.
+
+    None (default) keys the 429 breaker in `pulpline.util.http` per host -
+    right for generic feeds, where different hosts are different servers.
+    Sources whose requests all land on one provider's infrastructure behind
+    one limiter (Substack: publication subdomains, custom domains, and
+    substack.com itself) declare a scope so the first tripped breaker
+    protects every subscription on that provider, instead of each host
+    rediscovering the same limiter a retry-cycle at a time."""
+
     def __init__(self, client: httpx.Client | None = None) -> None:
         self._client = client
         self._owns_client = client is None
@@ -49,7 +60,7 @@ class Source(ABC):
     @property
     def client(self) -> httpx.Client:
         if self._client is None:
-            self._client = build_client()
+            self._client = build_client(scope=self.rate_limit_scope)
         return self._client
 
     def close(self) -> None:

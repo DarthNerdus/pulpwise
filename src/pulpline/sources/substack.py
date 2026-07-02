@@ -58,6 +58,11 @@ _CROSS_POST_RX = re.compile(r"^/cp/(\d+)/?$")
 
 class SubstackSource(Source):
     name: ClassVar[str] = "substack"
+    # Substack rate-limits per IP across ALL of its infrastructure - every
+    # publication subdomain, custom domains, and substack.com itself - so
+    # all Substack traffic shares one breaker bucket. Without this, a user
+    # with 50 subscriptions would trip 50 per-host breakers one at a time.
+    rate_limit_scope: ClassVar[str | None] = "substack"
 
     def __init__(
         self,

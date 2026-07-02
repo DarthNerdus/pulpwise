@@ -19,6 +19,7 @@ import httpx
 from pulpline.auth import AuthError, load_cookies
 from pulpline.config import Config, ConfigError, Subscription, add_subscription, save_config
 from pulpline.importers import parse_selection
+from pulpline.models import RateLimited
 from pulpline.util.http import build_client
 
 __all__ = [
@@ -147,11 +148,14 @@ def auto_reconcile(
 
     owns_client = client is None
     if client is None:
-        client = build_client()
+        client = build_client(scope="substack")
     try:
         try:
             pubs = list_user_subscriptions(cfg_username, cookies, client)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, RateLimited) as exc:
+            # RateLimited isn't an httpx error and would otherwise fly out of
+            # here and abort the TUI's whole sync run - but this function's
+            # contract is that a Substack hiccup must NOT block syncing.
             return config, SubstackAutoOutcome(error=f"substack follows fetch failed: {exc}")
     finally:
         if owns_client:

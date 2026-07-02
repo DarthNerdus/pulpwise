@@ -18,6 +18,29 @@ class FetchError(PulplineError):
     """Raised when an HTTP fetch fails or returns a non-success status."""
 
 
+class RateLimited(FetchError):  # noqa: N818 - same convention as Paywalled
+    """A host answered 429 Too Many Requests and kept answering it through retries.
+
+    Raised by the retrying transport in `pulpline.util.http` - either after
+    backoff retries are exhausted, or instantly (no network) while the host
+    is still inside a cooldown window from an earlier trip. Deliberately NOT
+    an `httpx.HTTPError`: source plugins wrap those in generic FetchErrors,
+    but this one flies past them so the pipeline can branch on it and stop
+    the current subscription instead of hammering the remaining items into
+    the same wall.
+
+    `host` is the rate-limiting bucket - a hostname, or a provider scope
+    like "substack" when the source declares one (Substack's limiter spans
+    all its publication domains). `retry_after` is how many seconds the
+    transport will keep refusing requests to that bucket.
+    """
+
+    def __init__(self, message: str, host: str, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.host = host
+        self.retry_after = retry_after
+
+
 class Paywalled(ExtractionError):  # noqa: N818 - "Error" suffix would be redundant + uglier
     """A specific kind of ExtractionError: post is paid + auth didn't work.
 

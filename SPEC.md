@@ -148,7 +148,7 @@ Dedup is **global** by `dedup_key`. An article appearing in two subscribed feeds
 ### Error handling
 - Feed-level failure (network error, malformed XML, HTTP 4xx/5xx): skip + log + continue. Persist to `subscription_state.last_error`.
 - Item-level failure (one article in a feed fails to fetch or convert): skip + log + continue with the next item.
-- No retries in v0.1. Wait for next `pulp sync`.
+- Rate limiting (HTTP 429) and transient 5xx: retried in the shared HTTP transport with exponential backoff, honoring `Retry-After`. Breaker state is keyed per host - or per provider scope when a source declares one (all Substack traffic shares one `substack` bucket, matching its per-IP limiter across publication domains). On the first exhausted 429 the transport waits out one bounded cooldown (<= 2 min) and resumes, pacing that bucket's requests ~1/s so a long sync completes in a single run. If the bucket trips again with no success in between, the current subscription stops early (remaining items defer to the next sync) and further requests to the bucket fail fast - no cascade of doomed requests.
 
 ## 3. Core Features (MVP - v0.1.0)
 

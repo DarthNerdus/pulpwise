@@ -11,7 +11,7 @@ from typing import Protocol
 import httpx
 
 from pulpline.config import Config, Subscription, default_output_dir, load_config
-from pulpline.models import ExtractionError, FetchError, Paywalled
+from pulpline.models import ExtractionError, FetchError, Paywalled, RateLimited
 from pulpline.sinks.filesystem import FilesystemSink
 from pulpline.sources import get_source, pick_source_for_url
 from pulpline.sources.base import Source
@@ -230,7 +230,7 @@ def _sync_with_source(
     error_msgs: list[str] = []
     paywalled_items: list[PaywalledItem] = []
 
-    for ref in refs:
+    for index, ref in enumerate(refs):
         key = dedup_key(ref.url)
         if was_ingested(conn, key):
             # Includes soft-deleted items - don't re-fetch what the user deleted.
@@ -258,6 +258,21 @@ def _sync_with_source(
                 ),
             )
             new_items += 1
+        except RateLimited as exc:
+            # Must precede the FetchError clause (it's a subclass). By the
+            # time this raises, the transport already waited out one full
+            # cooldown - the limiter is genuinely angry, so every remaining
+            # fetch to the same bucket is doomed too. Stop the subscription
+            # instead of burning a request cycle per item. Nothing is lost:
+            # unfetched refs aren't in the ledger, so the next sync picks
+            # them up.
+            remaining = len(refs) - index
+            _log.warning("sync %s rate-limited url=%s err=%s", sub.name, ref.url, exc)
+            errors += 1
+            error_msgs.append(f"{exc}; {remaining} item(s) deferred to the next sync run")
+            if progress is not None:
+                progress.item_finished(sub.name)
+            break
         except Paywalled as exc:
             _log.info("sync %s paywalled url=%s host=%s", sub.name, ref.url, exc.host)
             paywalled_items.append(PaywalledItem(url=ref.url, host=exc.host))
@@ -294,7 +309,7 @@ class BackfillReport:
     skipped_already_ingested: int
     errors: int
     pages_walked: int
-    stopped_reason: str  # 'max_new', 'since', 'exhausted', 'unsupported'
+    stopped_reason: str  # 'max_new', 'since', 'exhausted', 'rate_limited', 'unsupported'
     error_messages: tuple[str, ...] = ()
 
 
@@ -322,6 +337,9 @@ def backfill(
       - `max_new`: stop after N successful ingestions (None = unlimited)
       - `since_iso`: stop when a post's pub_date is older than this date
       - Source's pagination exhausted (API returns empty page)
+      - Host rate-limits us past the transport's retries (persistent 429):
+        the walk ends early with `stopped_reason='rate_limited'`; re-running
+        backfill later resumes where it left off via the dedup ledger
 
     Already-ingested items (including soft-deleted ones) are skipped via
     the dedup ledger but don't stop the walk - we keep going past them
@@ -374,52 +392,64 @@ def _backfill_with_source(
     page_size = 25  # mirrors _DISCOVER_LIMIT in substack source
 
     refs_iter = source.discover_backwards(sub.url)  # type: ignore[attr-defined]
-    for ref in refs_iter:
-        seen_refs += 1
-        if seen_refs % page_size == 1:
-            pages_walked += 1
+    # RateLimited is caught around the whole walk (not per item) because it
+    # can surface from two places: an item fetch, or the pagination request
+    # hiding inside the refs_iter generator. Either way the response is the
+    # same - stop walking; a later backfill resumes via the dedup ledger.
+    try:
+        for ref in refs_iter:
+            seen_refs += 1
+            if seen_refs % page_size == 1:
+                pages_walked += 1
 
-        # Date floor: refs come newest-first, so once we see a pub_date
-        # before the floor we know everything after is older too.
-        if since_iso and ref.pub_date is not None:
-            ref_iso = ref.pub_date.isoformat()
-            if ref_iso < since_iso:
-                stopped_reason = "since"
+            # Date floor: refs come newest-first, so once we see a pub_date
+            # before the floor we know everything after is older too.
+            if since_iso and ref.pub_date is not None:
+                ref_iso = ref.pub_date.isoformat()
+                if ref_iso < since_iso:
+                    stopped_reason = "since"
+                    break
+
+            key = dedup_key(ref.url)
+            if was_ingested(conn, key):
+                skipped += 1
+                continue
+
+            try:
+                article = source.fetch(ref)
+                article = replace(article, subscription_name=sub.name)
+                content = source.render(article)
+                path = sink.write(article, content, source.extension)
+                record_item(
+                    conn,
+                    ItemRecord(
+                        subscription_name=sub.name,
+                        source_url=sub.url,
+                        dedup_key=key,
+                        canonical_url=article.canonical_url,
+                        title=article.title,
+                        pub_date=_iso_or_none(article.pub_date),
+                        output_path=str(path),
+                    ),
+                )
+                new_items += 1
+            except Paywalled as exc:
+                _log.info("backfill %s paywalled url=%s host=%s", sub.name, ref.url, exc.host)
+            except RateLimited:
+                raise  # must precede FetchError (subclass); handled by the outer except
+            except (FetchError, ExtractionError) as exc:
+                _log.warning("backfill %s item failed url=%s err=%s", sub.name, ref.url, exc)
+                errors += 1
+                error_msgs.append(f"{ref.url}: {exc}")
+
+            if max_new is not None and new_items >= max_new:
+                stopped_reason = "max_new"
                 break
-
-        key = dedup_key(ref.url)
-        if was_ingested(conn, key):
-            skipped += 1
-            continue
-
-        try:
-            article = source.fetch(ref)
-            article = replace(article, subscription_name=sub.name)
-            content = source.render(article)
-            path = sink.write(article, content, source.extension)
-            record_item(
-                conn,
-                ItemRecord(
-                    subscription_name=sub.name,
-                    source_url=sub.url,
-                    dedup_key=key,
-                    canonical_url=article.canonical_url,
-                    title=article.title,
-                    pub_date=_iso_or_none(article.pub_date),
-                    output_path=str(path),
-                ),
-            )
-            new_items += 1
-        except Paywalled as exc:
-            _log.info("backfill %s paywalled url=%s host=%s", sub.name, ref.url, exc.host)
-        except (FetchError, ExtractionError) as exc:
-            _log.warning("backfill %s item failed url=%s err=%s", sub.name, ref.url, exc)
-            errors += 1
-            error_msgs.append(f"{ref.url}: {exc}")
-
-        if max_new is not None and new_items >= max_new:
-            stopped_reason = "max_new"
-            break
+    except RateLimited as exc:
+        _log.warning("backfill %s rate-limited: %s", sub.name, exc)
+        errors += 1
+        error_msgs.append(str(exc))
+        stopped_reason = "rate_limited"
 
     _log.info(
         "backfill %s done: new=%d skipped=%d errors=%d pages=%d stopped=%s",

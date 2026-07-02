@@ -290,6 +290,8 @@ def _backfill_outcome_message(
         bits.append(f"full archive now ingested ({base_count} posts)")
     elif report.stopped_reason == "since":
         bits.append("stopped at --since date")
+    elif report.stopped_reason == "rate_limited":
+        bits.append("rate limited - wait a bit, then backfill again to continue")
 
     if report.errors:
         bits.append(f"{report.errors} error(s)")

@@ -8,7 +8,40 @@ from pathlib import Path
 import httpx
 import pytest
 
+from pulpline.util.http import reset_rate_limit_state
+
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+class FakeTimer:
+    """Deterministic clock + sleep recorder for retry/backoff tests.
+
+    Sleeping advances the clock, so code that sleeps through a cooldown
+    window actually gets past it without wall-clock time elapsing.
+    """
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+        self.sleeps: list[float] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture
+def fake_timer() -> FakeTimer:
+    return FakeTimer()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rate_limit_state() -> None:
+    """The retry transport keeps process-wide per-host cooldowns; forget them
+    between tests so one test's tripped host can't fail-fast another's."""
+    reset_rate_limit_state()
 
 
 @pytest.fixture(autouse=True)
