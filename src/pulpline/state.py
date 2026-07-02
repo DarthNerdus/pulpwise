@@ -288,10 +288,14 @@ class LibraryItem:
 
 def list_items(
     conn: sqlite3.Connection,
-    limit: int = 500,
+    limit: int | None = 500,
     filter_text: str | None = None,
 ) -> list[LibraryItem]:
-    """Return recent items, optionally filtered by case-insensitive title/url match."""
+    """Return recent items, optionally filtered by case-insensitive title/url match.
+
+    `limit=None` returns every live item - the library view uses that so
+    the list is complete rather than a sliding most-recent window.
+    """
     sql = (
         "SELECT id, title, canonical_url, subscription_name, ingested_at, pub_date, "
         "output_path, deleted_at "
@@ -302,8 +306,10 @@ def list_items(
         sql += " AND (LOWER(title) LIKE ? OR LOWER(canonical_url) LIKE ?)"
         like = f"%{filter_text.lower()}%"
         params.extend([like, like])
-    sql += " ORDER BY ingested_at DESC, id DESC LIMIT ?"
-    params.append(limit)
+    sql += " ORDER BY ingested_at DESC, id DESC"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
     rows = conn.execute(sql, params).fetchall()
     return [
         LibraryItem(
@@ -459,13 +465,14 @@ def activity_per_day(conn: sqlite3.Connection, days: int = 30) -> list[tuple[str
 
 def list_recently_deleted(
     conn: sqlite3.Connection,
-    limit: int = 200,
+    limit: int | None = 200,
     filter_text: str | None = None,
 ) -> list[LibraryItem]:
     """Return soft-deleted items, most-recently-deleted first.
 
     Items with NULL `deleted_at` (deleted before the column existed) are
     included but sorted last - we know they're deleted, just not when.
+    `limit=None` returns every tombstone.
 
     Returns the same `LibraryItem` dataclass as `list_items`: `output_path`
     is always None and `deleted_at` is set (possibly NULL for historic
@@ -483,8 +490,10 @@ def list_recently_deleted(
         like = f"%{filter_text.lower()}%"
         params.extend([like, like])
     # NULL deleted_at sorts last via COALESCE-to-empty; otherwise newest first.
-    sql += " ORDER BY COALESCE(deleted_at, '') DESC, ingested_at DESC LIMIT ?"
-    params.append(limit)
+    sql += " ORDER BY COALESCE(deleted_at, '') DESC, ingested_at DESC"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
     rows = conn.execute(sql, params).fetchall()
     return [
         LibraryItem(

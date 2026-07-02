@@ -84,11 +84,14 @@ class LibraryView(View):
         filter_input = self.query_one("#library-filter", Input)
         filter_text = filter_input.value.strip() or None
         totals: dict[str, int | None] = {}
+        # No limit: the library must show everything. A cap here turns
+        # deletes into whack-a-mole - each removal slides the next-oldest
+        # item into the window, so the list never visibly shrinks.
         with connect() as conn:
             if self._show_deleted:
-                items = list_recently_deleted(conn, limit=500, filter_text=filter_text)
+                items = list_recently_deleted(conn, limit=None, filter_text=filter_text)
             else:
-                items = list_items(conn, limit=500, filter_text=filter_text)
+                items = list_items(conn, limit=None, filter_text=filter_text)
                 for bucket in {item.subscription_name for item in items if item.subscription_name}:
                     state = get_subscription_state(conn, bucket)
                     totals[bucket] = state.total_items if state else None

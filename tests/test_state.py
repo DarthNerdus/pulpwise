@@ -132,6 +132,36 @@ def test_list_items_returns_recent_first(tmp_path: Path) -> None:
     assert items[0].output_path == "/tmp/b.epub"
 
 
+def test_list_items_limit_none_returns_everything(tmp_path: Path) -> None:
+    """The library view passes limit=None so the list is complete. A cap
+    turned deletes into whack-a-mole: each removal slid the next-oldest
+    item into the visible window."""
+    from pulpline.state import list_items
+
+    db = tmp_path / "state.db"
+    with connect(db) as conn:
+        for i in range(600):
+            record_item(conn, _record(dedup=f"k{i}", path=f"/tmp/{i}.epub"))
+
+        assert len(list_items(conn)) == 500  # default cap still applies
+        assert len(list_items(conn, limit=3)) == 3
+        assert len(list_items(conn, limit=None)) == 600
+
+
+def test_list_recently_deleted_limit_none_returns_everything(tmp_path: Path) -> None:
+    from pulpline.state import delete_item, list_recently_deleted
+
+    db = tmp_path / "state.db"
+    with connect(db) as conn:
+        for i in range(250):
+            record_item(conn, _record(dedup=f"k{i}", path=f"/tmp/{i}.epub"))
+        for (item_id,) in conn.execute("SELECT id FROM items").fetchall():
+            delete_item(conn, item_id)
+
+        assert len(list_recently_deleted(conn)) == 200  # default cap still applies
+        assert len(list_recently_deleted(conn, limit=None)) == 250
+
+
 def test_list_items_filter_text(tmp_path: Path) -> None:
     from pulpline.state import ItemRecord, list_items
 
