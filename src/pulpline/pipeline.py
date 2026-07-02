@@ -346,7 +346,9 @@ def backfill(
     to catch sparse holes in the existing data.
 
     Raises `BackfillUnsupported` if the source doesn't implement
-    `discover_backwards`. Currently only SubstackSource does.
+    `discover_backwards`. Currently the Substack sources do: publications
+    walk the archive by offset, the saves list walks the reader feed by
+    save time.
     """
     cfg = config or load_config()
     try:

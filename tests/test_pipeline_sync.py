@@ -286,6 +286,69 @@ def test_backfill_stops_on_rate_limit(tmp_path: Path, fake_timer: FakeTimer) -> 
     assert len(post_requests) == 5
 
 
+def test_backfill_substack_saves_walks_reader_feed_not_archive(tmp_path: Path) -> None:
+    """Backfilling the saved-posts subscription must page the reader saves
+    feed - not `<url>/api/v1/archive`, which 404s under /inbox/saved (the
+    inherited publication walk that broke saved-list backfill)."""
+    import json
+
+    cookies_file = tmp_path / "cookies.json"
+    cookies_file.write_text(
+        json.dumps([{"name": "substack.sid", "value": "s", "domain": ".substack.com"}]),
+        encoding="utf-8",
+    )
+
+    saves_page = {
+        "posts": [
+            {
+                "id": 1,
+                "title": "Saved Post",
+                "canonical_url": "https://pub.substack.com/p/saved-post",
+                "post_date": "2026-01-01T00:00:00.000Z",
+            }
+        ],
+        "savedPosts": [{"user_id": 1, "post_id": 1, "created_at": "2026-06-01T00:00:00.000Z"}],
+        "more": False,
+    }
+    post_body = {
+        "title": "Saved Post",
+        "canonical_url": "https://pub.substack.com/p/saved-post",
+        "body_html": "<p>body</p>",
+        "audience": "everyone",
+        "post_date": "2026-01-01T00:00:00.000Z",
+        "publishedBylines": [{"name": "Author"}],
+        "publication": {"name": "Pub"},
+    }
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/v1/reader/posts":
+            return httpx.Response(200, json=saves_page)
+        if request.url.path == "/api/v1/posts/saved-post":
+            return httpx.Response(200, json=post_body)
+        return httpx.Response(404, text=f"unmocked: {request.url}")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    sub = Subscription(
+        name="substack-saves",
+        source="substack-saved",
+        url="https://substack.com/inbox/saved",
+        output_dir=str(tmp_path / "out"),
+    )
+    cfg = Config(
+        subscriptions=(sub,),
+        auth={"substack": {"cookies_path": str(cookies_file)}},
+    )
+
+    report = pipeline.backfill(sub, config=cfg, client=client)
+
+    assert report.stopped_reason == "exhausted"
+    assert report.new_items == 1
+    assert report.errors == 0
+    assert not any("archive" in r.url.path for r in requests)
+
+
 def test_sync_substack_scope_protects_other_publications(
     tmp_path: Path, fake_timer: FakeTimer
 ) -> None:

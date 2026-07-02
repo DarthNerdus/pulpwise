@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Self
 from urllib.parse import urlsplit
 
 import httpx
@@ -68,7 +68,7 @@ class Source(ABC):
             self._client.close()
             self._client = None
 
-    def __enter__(self) -> Source:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_: object) -> None:

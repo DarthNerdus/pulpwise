@@ -8,7 +8,8 @@ Two source variants live here:
   * `SubstackSource` - per-publication archive, indexed by site URL.
   * `SubstackSavedSource` - the user's "saved for later" list across every
     publication, indexed by `https://substack.com/inbox/saved`. Inherits
-    SubstackSource's auth + fetch logic; only the discover endpoint differs.
+    SubstackSource's auth + fetch logic; discovery (and backfill's backwards
+    walk) go through the reader saves feed instead of a publication archive.
 """
 
 from __future__ import annotations
@@ -37,10 +38,13 @@ _DISCOVER_LIMIT = 25
 _SAVED_HOSTS = {"substack.com", "www.substack.com"}
 _SAVED_PATH = "/inbox/saved"
 # Substack moved the saved-posts feed off `/api/v1/posts/saved` around
-# May 2026 (that path now 404s). The current endpoint is a bucketed
-# reader feed; passing `bucket=saved` gates the same data behind the
-# user's session cookies as before. Response wraps posts under `posts`,
-# which `_unwrap_post_list` already handles.
+# May 2026 (that path now 404s). The current endpoint is the reader
+# feed the web app's inbox uses; `inboxType=saved` selects the saves-
+# only view. (An earlier revision passed `bucket=saved`, which Substack
+# silently ignores - that returned the generic inbox feed, mixing saves
+# with new subscription posts.) Auth rides on the user's session
+# cookies as before. Response wraps posts under `posts`, which
+# `_unwrap_post_list` already handles.
 _SAVED_API = "https://substack.com/api/v1/reader/posts"
 # The reader endpoint server-side-validates `limit` and rejects values
 # >20 with a 400 ("Invalid value"). The old /posts/saved tolerated 25;
@@ -276,28 +280,75 @@ class SubstackSavedSource(SubstackSource):
 
     def discover(self, target_url: str) -> Iterable[ItemRef]:
         self._publication_url = target_url.rstrip("/")
+        self._require_cookies()
+        yield from self._refs_from_payload(self._saved_page())
+
+    def discover_backwards(self, target_url: str) -> Iterable[ItemRef]:
+        """Walk the whole saved list backwards, newest saves first.
+
+        Pagination mirrors the web app's infinite scroll on
+        substack.com/inbox/saved: each page is requested with
+        `after=<oldest save-time on the previous page>` and the response's
+        `more` flag says whether older saves remain. The feed is ordered by
+        *save time* (`savedPosts[].created_at`), and `after` filters on that
+        same timestamp. (Substack's own frontend passes the last item's
+        `content_date` instead - which skips saves whose publish date is
+        newer than the cutoff; verified empirically. We pass the save time.)
+
+        Refs therefore come in save-time order, not publish order: an old
+        post saved yesterday is yielded before a new post saved last month.
+        A backfill date floor (`--since`, compared against pub_date) can
+        stop the walk before reaching recently-saved older posts.
+        """
+        self._publication_url = target_url.rstrip("/")
+        self._require_cookies()
+        after: str | None = None
+        cursor: str | None = None
+        while True:
+            payload = self._saved_page(after=after, cursor=cursor)
+            yield from self._refs_from_payload(payload)
+            if not isinstance(payload, dict) or not payload.get("more"):
+                return
+            oldest = _oldest_save_time(payload)
+            if oldest is None or oldest == after:
+                # No save timestamps to page on (shape change) or no forward
+                # progress: stop rather than refetch the same page forever.
+                return
+            after = oldest
+            raw_cursor = payload.get("cursor")
+            cursor = raw_cursor if isinstance(raw_cursor, str) and raw_cursor else None
+
+    def _require_cookies(self) -> None:
         if not self._cookies:
             raise FetchError(
                 "Substack saved-posts requires login cookies. "
                 "Set [auth.substack].cookies_path in config (export from your "
                 "logged-in browser session)."
             )
+
+    def _saved_page(self, *, after: str | None = None, cursor: str | None = None) -> Any:
+        """Fetch one page of the saves feed. Returns the raw JSON payload."""
+        params: dict[str, str] = {
+            "inboxType": "saved",
+            "limit": str(_SAVED_DISCOVER_LIMIT),
+        }
+        if after:
+            params["after"] = after
+        if cursor:
+            params["cursor"] = cursor
         try:
-            response = self.client.get(
-                _SAVED_API,
-                params={"bucket": "saved", "limit": str(_SAVED_DISCOVER_LIMIT)},
-            )
+            response = self.client.get(_SAVED_API, params=params)
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise FetchError(f"failed to list saved posts: {exc}") from exc
-
         try:
-            payload = response.json()
+            return response.json()
         except ValueError as exc:
             raise ExtractionError("saved-posts endpoint did not return JSON") from exc
 
-        # Substack's reverse-engineered shape: usually a flat list of post
-        # objects, but some reader endpoints wrap them under `posts` /
+    def _refs_from_payload(self, payload: Any) -> Iterable[ItemRef]:
+        # Substack's reverse-engineered shape: usually {posts: [...], ...},
+        # but some reader endpoints return a flat list or wrap under
         # `items` / `results`. Accept any of those before failing.
         posts = _unwrap_post_list(payload)
         if posts is None:
@@ -305,18 +356,17 @@ class SubstackSavedSource(SubstackSource):
                 f"saved-posts endpoint returned unexpected shape: {type(payload).__name__}"
             )
 
-        # The reader endpoint with bucket=saved returns mixed content: the
-        # user's actual saves PLUS recommendations / new posts from
-        # publications they follow. Only items whose post_id appears in
-        # `savedPosts` are real saves. When the savedPosts array is present
-        # in the payload we use it to filter; if absent (legacy / alternate
-        # shape) we fall back to trusting the full `posts` array.
+        # With inboxType=saved the feed is saves-only in practice, but keep
+        # intersecting on `savedPosts` (the join table alongside `posts`) as
+        # a guard: if Substack ever mixes other content back in, only items
+        # whose post_id appears there are real saves. Absent savedPosts
+        # (legacy / alternate shape) we trust the full `posts` array.
         if isinstance(payload, dict) and "savedPosts" in payload:
             saved_ids = _extract_saved_post_ids(payload["savedPosts"])
             if saved_ids is not None:
                 posts = [p for p in posts if isinstance(p, dict) and p.get("id") in saved_ids]
 
-        yield from _yield_post_refs(posts)
+        return _yield_post_refs(posts)
 
     def fetch(self, ref: ItemRef) -> RawArticle:
         """Saves land in one folder mixed across publications, so embed the
@@ -386,6 +436,25 @@ def _extract_saved_post_ids(saved_posts: object) -> set[int] | None:
         if isinstance(entry, dict) and isinstance(entry.get("post_id"), int):
             ids.add(entry["post_id"])
     return ids
+
+
+def _oldest_save_time(payload: dict[str, Any]) -> str | None:
+    """The saves-feed pagination cursor: oldest `savedPosts[].created_at`.
+
+    The feed is ordered by save time descending and `after` filters on that
+    timestamp, so the oldest save time on this page is exactly the `after`
+    value that yields the next page. Timestamps are same-format ISO-8601
+    Zulu strings from one endpoint, so `min` compares them correctly.
+    """
+    entries = payload.get("savedPosts")
+    if not isinstance(entries, list):
+        return None
+    times = [
+        e["created_at"]
+        for e in entries
+        if isinstance(e, dict) and isinstance(e.get("created_at"), str) and e["created_at"]
+    ]
+    return min(times) if times else None
 
 
 def _yield_post_refs(posts: list[Any]) -> Iterable[ItemRef]:

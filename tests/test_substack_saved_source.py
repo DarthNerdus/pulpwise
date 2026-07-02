@@ -249,10 +249,13 @@ def test_discover_empty_saved_posts_array_yields_no_refs() -> None:
     assert refs == []
 
 
-def test_discover_sends_bucket_saved_query_param() -> None:
-    """Pin the contract with Substack's reader endpoint: bucket=saved must be in the
-    query. The endpoint serves multiple buckets; without bucket=saved we'd get
-    a different feed entirely (or a 400)."""
+def test_discover_sends_inbox_type_saved_query_param() -> None:
+    """Pin the contract with Substack's reader endpoint: inboxType=saved must
+    be in the query. The endpoint serves several inbox views; without it we'd
+    get the generic inbox feed (saves mixed with new subscription posts).
+    Notably `bucket=saved` is NOT the parameter - Substack silently ignores
+    unknown params, so that variant *appears* to work while reading the
+    wrong feed."""
     seen: dict[str, str | None] = {"query": None}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -267,4 +270,130 @@ def test_discover_sends_bucket_saved_query_param() -> None:
         list(source.discover(SAVES_URL))
 
     assert seen["query"] is not None
-    assert "bucket=saved" in seen["query"]
+    assert "inboxType=saved" in seen["query"]
+
+
+# ---- discover_backwards: the backfill walk over the saves feed ----
+
+
+def _saved_page(posts: list[dict[str, Any]], saved_at: list[str], *, more: bool) -> dict[str, Any]:
+    """Reader-feed page: posts + the savedPosts join array + `more` flag."""
+    return {
+        "posts": posts,
+        "savedPosts": [
+            {"user_id": 1, "post_id": p["id"], "created_at": t}
+            for p, t in zip(posts, saved_at, strict=True)
+        ],
+        "more": more,
+    }
+
+
+def test_discover_backwards_requires_cookies() -> None:
+    with SubstackSavedSource() as source, pytest.raises(FetchError, match="cookies"):
+        list(source.discover_backwards(SAVES_URL))
+
+
+def test_discover_backwards_pages_with_after_equal_to_oldest_save_time() -> None:
+    """The walk hits the reader feed (never `<url>/api/v1/archive` - the 404
+    that broke saved-list backfill), passing `after=<oldest saved_at of the
+    previous page>` until `more` is false."""
+    pages: dict[str | None, dict[str, Any]] = {
+        None: _saved_page(
+            [_post("a", "Post A", 1), _post("b", "Post B", 2)],
+            ["2026-06-02T00:00:00.000Z", "2026-06-01T00:00:00.000Z"],
+            more=True,
+        ),
+        "2026-06-01T00:00:00.000Z": _saved_page(
+            [_post("c", "Post C", 3)],
+            ["2026-05-01T00:00:00.000Z"],
+            more=False,
+        ),
+    }
+    seen_queries: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).split("?")[0] != SAVES_API:
+            return httpx.Response(404, text=f"unmocked: {request.url}")
+        seen_queries.append(dict(request.url.params))
+        return httpx.Response(200, json=pages[request.url.params.get("after")])
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with SubstackSavedSource(
+        client=client,
+        cookies=[CookieEntry(name="session", value="x", domain=".substack.com")],
+    ) as source:
+        refs = list(source.discover_backwards(SAVES_URL))
+
+    assert [r.title for r in refs] == ["Post A", "Post B", "Post C"]
+    assert len(seen_queries) == 2
+    assert all(q["inboxType"] == "saved" for q in seen_queries)
+    assert "after" not in seen_queries[0]
+    assert seen_queries[1]["after"] == "2026-06-01T00:00:00.000Z"
+
+
+def test_discover_backwards_stops_without_save_timestamps() -> None:
+    """`more=true` but no savedPosts to page on (shape change): stop after one
+    page instead of refetching the same page forever."""
+    payload = {"posts": [_post("a", "Post A", 1)], "more": True}
+    requests_made: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests_made.append(str(request.url))
+        return httpx.Response(200, json=payload)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with SubstackSavedSource(
+        client=client,
+        cookies=[CookieEntry(name="session", value="x", domain=".substack.com")],
+    ) as source:
+        refs = list(source.discover_backwards(SAVES_URL))
+
+    assert [r.title for r in refs] == ["Post A"]
+    assert len(requests_made) == 1
+
+
+def test_discover_backwards_stops_when_after_makes_no_progress() -> None:
+    """A server that keeps returning the same page (same oldest save time,
+    more=true) must not loop: the no-progress guard ends the walk."""
+    payload = _saved_page([_post("a", "Post A", 1)], ["2026-06-01T00:00:00.000Z"], more=True)
+    requests_made: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests_made.append(str(request.url))
+        return httpx.Response(200, json=payload)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with SubstackSavedSource(
+        client=client,
+        cookies=[CookieEntry(name="session", value="x", domain=".substack.com")],
+    ) as source:
+        refs = list(source.discover_backwards(SAVES_URL))
+
+    # Page 1 (after=None) advances to after=T1; page 2 returns the same
+    # oldest save time, so the guard stops before a third request.
+    assert len(requests_made) == 2
+    assert len(refs) == 2  # dup ref is fine - the dedup ledger drops it
+
+
+def test_discover_backwards_threads_cursor_through_when_present() -> None:
+    """When a page carries a `cursor`, the next request passes it along
+    (matching the web app, which forwards `result.cursor` when set)."""
+    page1 = _saved_page([_post("a", "Post A", 1)], ["2026-06-01T00:00:00.000Z"], more=True)
+    page1["cursor"] = "opaque-token"
+    page2 = _saved_page([_post("b", "Post B", 2)], ["2026-05-01T00:00:00.000Z"], more=False)
+    seen_queries: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_queries.append(dict(request.url.params))
+        return httpx.Response(200, json=page2 if "after" in request.url.params else page1)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with SubstackSavedSource(
+        client=client,
+        cookies=[CookieEntry(name="session", value="x", domain=".substack.com")],
+    ) as source:
+        refs = list(source.discover_backwards(SAVES_URL))
+
+    assert [r.title for r in refs] == ["Post A", "Post B"]
+    assert "cursor" not in seen_queries[0]
+    assert seen_queries[1]["cursor"] == "opaque-token"
