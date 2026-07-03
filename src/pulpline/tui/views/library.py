@@ -108,9 +108,7 @@ class LibraryView(View):
         # like 'substack-saves' clutter the view otherwise. Manually-
         # expanded buckets stay expanded across refresh/delete actions.
         expanded_buckets = {
-            _bucket_from_label(str(node.label))
-            for node in tree.root.children
-            if node.is_expanded
+            _bucket_from_label(str(node.label)) for node in tree.root.children if node.is_expanded
         }
         tree.clear()
         if not groups:

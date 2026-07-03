@@ -257,9 +257,7 @@ class SubscriptionsView(View):
         self.app.call_from_thread(self.refresh_data)
 
 
-def _backfill_outcome_message(
-    sub_name: str, report: pipeline.BackfillReport
-) -> tuple[str, str]:
+def _backfill_outcome_message(sub_name: str, report: pipeline.BackfillReport) -> tuple[str, str]:
     """Turn a BackfillReport into a Telegram-grade one-liner + severity.
 
     The three outcomes that matter to the user, in priority order:

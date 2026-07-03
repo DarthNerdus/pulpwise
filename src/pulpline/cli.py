@@ -541,9 +541,11 @@ def backfill(
     but the walk continues past them, so partially-populated subscriptions
     get their gaps filled in too.
 
-    Currently only Substack publications support backfill. RSS feeds can't
-    be paginated (the feed only serves what it serves); arXiv backfill is
-    done by editing the query URL itself.
+    Substack publications and email mailboxes support backfill (an email
+    backfill walks the whole IMAP folder newest-first, past the regular
+    `since_days` window). RSS feeds can't be paginated (the feed only
+    serves what it serves); arXiv backfill is done by editing the query
+    URL itself.
     """
     config = load_config()
     sub = config.find(name)
@@ -571,9 +573,7 @@ def backfill(
 
     base_count = report.skipped_already_ingested + report.new_items
     if report.new_items == 0 and report.stopped_reason == "exhausted":
-        typer.echo(
-            f"nothing more to fetch - full archive ({base_count} posts) already ingested"
-        )
+        typer.echo(f"nothing more to fetch - full archive ({base_count} posts) already ingested")
         return
     bits = [f"backfilled {report.new_items} post(s)"]
     if report.skipped_already_ingested:
@@ -702,14 +702,19 @@ def _rebuild_items(name: str | None) -> None:
                         article = source.fetch(ref)
                         article = replace(article, subscription_name=sub.name)
                         content = source.render(article)
-                        new_path = sink.write(article, content, source.extension)
                     except (FetchError, ExtractionError) as exc:
                         typer.echo(f"  failed {item.canonical_url}: {exc}", err=True)
                         grand_failed += 1
                         continue
 
-                    if item.output_path and item.output_path != str(new_path):
+                    # Unlink the item's own file BEFORE writing: the rebuilt
+                    # file then reclaims its name, while the sink's collision
+                    # suffixing still protects OTHER items that share the
+                    # title (blind overwrite would collapse them onto one
+                    # path and destroy content).
+                    if item.output_path:
                         Path(item.output_path).unlink(missing_ok=True)
+                    new_path = sink.write(article, content, source.extension)
                     update_item_path(conn, item.id, str(new_path))
                     grand_rebuilt += 1
 

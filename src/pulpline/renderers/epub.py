@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import html
 import logging
+import re
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +19,7 @@ from ebooklib import epub
 
 from pulpline.models import RawArticle
 from pulpline.renderers.base import Renderer
+from pulpline.util.email_clean import parse_data_uri
 from pulpline.util.http import build_client
 
 _log = logging.getLogger("pulpline.renderers.epub")
@@ -44,6 +47,15 @@ class EpubRenderer(Renderer):
         self._image_client = image_client
 
     def render(self, article: RawArticle) -> bytes:
+        # Scrub XML-incompatible control characters from metadata: lxml
+        # refuses to serialize them, and email subjects (which become titles
+        # here) are attacker-controlled.
+        article = dataclasses.replace(
+            article,
+            title=_xml_safe(article.title),
+            author=_xml_safe(article.author) if article.author else None,
+            publisher=_xml_safe(article.publisher) if article.publisher else None,
+        )
         book = epub.EpubBook()
         book.set_identifier(article.canonical_url)
         book.set_title(article.title)
@@ -130,7 +142,36 @@ def _embed_images(
     try:
         for img in img_tags:
             src = (img.get("src") or "").strip()
-            if not src or src.startswith("data:"):
+            if not src:
+                continue
+            if src.startswith("data:"):
+                # Inline images (email cid: attachments arrive this way).
+                # Decode into a proper EPUB resource - some readers refuse
+                # data: URIs in content documents.
+                parsed = parse_data_uri(src)
+                if parsed is None:
+                    continue
+                content_type, payload = parsed
+                ext = _CONTENT_TYPE_TO_EXT.get(content_type)
+                if ext is None:
+                    continue
+                if src in seen:
+                    img.set("src", seen[src])
+                    _strip_responsive_attrs(img)
+                    continue
+                counter += 1
+                local_path = f"{_IMAGE_DIR}/img{counter:03d}{ext}"
+                book.add_item(
+                    epub.EpubImage(
+                        uid=f"img{counter:03d}",
+                        file_name=local_path,
+                        media_type=content_type,
+                        content=payload,
+                    )
+                )
+                seen[src] = local_path
+                img.set("src", local_path)
+                _strip_responsive_attrs(img)
                 continue
             if base_url and not src.startswith(("http://", "https://", "//")):
                 src = urljoin(base_url, src)
@@ -145,7 +186,10 @@ def _embed_images(
             try:
                 response = c.get(src)
                 response.raise_for_status()
-            except httpx.HTTPError as exc:
+            except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
+                # InvalidURL/ValueError: a malformed src (bad IDNA host,
+                # control chars) must stay fail-soft like network errors -
+                # one broken image shouldn't kill the whole render.
                 _log.debug("epub image fetch failed url=%s err=%s", src, exc)
                 continue
 
@@ -242,6 +286,13 @@ def _wrap_html(article: RawArticle, body_html: str | None = None) -> str:
         "</body>\n"
         "</html>\n"
     )
+
+
+_XML_UNSAFE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _xml_safe(text: str) -> str:
+    return _XML_UNSAFE.sub("", text)
 
 
 def _now_iso() -> str:

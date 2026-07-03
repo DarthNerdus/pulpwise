@@ -61,9 +61,7 @@ def test_message_when_exhausted_with_new_items_says_fully_ingested() -> None:
 
 
 def test_message_when_since_date_hit() -> None:
-    msg, _ = _backfill_outcome_message(
-        "etymology", _report(new=5, skipped=2, stopped="since")
-    )
+    msg, _ = _backfill_outcome_message("etymology", _report(new=5, skipped=2, stopped="since"))
     assert "+5 from etymology" in msg
     assert "--since" in msg
 

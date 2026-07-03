@@ -11,7 +11,7 @@ from typing import Protocol
 import httpx
 
 from pulpline.config import Config, Subscription, default_output_dir, load_config
-from pulpline.models import ExtractionError, FetchError, Paywalled, RateLimited
+from pulpline.models import ExtractionError, FetchError, ItemRef, Paywalled, RateLimited
 from pulpline.sinks.filesystem import FilesystemSink
 from pulpline.sources import get_source, pick_source_for_url
 from pulpline.sources.base import Source
@@ -27,6 +27,24 @@ from pulpline.util.dedup import dedup_key
 from pulpline.util.logging import get_logger
 
 _log = get_logger("pipeline")
+
+
+def _ack_item(source: Source, ref: ItemRef) -> None:
+    """Tell the source an item is fully accounted for (recorded or skipped).
+
+    Duck-typed like `discover_backwards`: sources that care (email's
+    mark-read/move policy) implement `ack(ref)`; everyone else doesn't. Runs
+    only *after* the ledger owns the item, so a source can safely do things
+    that take the item out of future discovery (move the message). Failures
+    are logged and swallowed - the item is already safe in the ledger.
+    """
+    ack = getattr(source, "ack", None)
+    if not callable(ack):
+        return
+    try:
+        ack(ref)
+    except Exception as exc:  # ack is best-effort by contract
+        _log.warning("ack failed url=%s err=%s", ref.url, exc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +253,10 @@ def _sync_with_source(
         if was_ingested(conn, key):
             # Includes soft-deleted items - don't re-fetch what the user deleted.
             skipped += 1
+            # Ack skips too: this lets a source heal external state that a
+            # past crash left behind (item recorded but message never
+            # marked/moved).
+            _ack_item(source, ref)
             if progress is not None:
                 progress.item_finished(sub.name, skipped=True)
             continue
@@ -258,6 +280,7 @@ def _sync_with_source(
                 ),
             )
             new_items += 1
+            _ack_item(source, ref)
         except RateLimited as exc:
             # Must precede the FetchError clause (it's a subclass). By the
             # time this raises, the transport already waited out one full
@@ -363,7 +386,7 @@ def backfill(
         if not hasattr(source, "discover_backwards"):
             raise BackfillUnsupported(
                 f"source {sub.source!r} doesn't support backfill yet "
-                "(only Substack publications do for now)"
+                "(Substack and email sources do)"
             )
         return _backfill_with_source(sub, cfg, conn, source, max_new=max_new, since_iso=since_iso)
 
@@ -415,6 +438,7 @@ def _backfill_with_source(
             key = dedup_key(ref.url)
             if was_ingested(conn, key):
                 skipped += 1
+                _ack_item(source, ref)
                 continue
 
             try:
@@ -435,6 +459,7 @@ def _backfill_with_source(
                     ),
                 )
                 new_items += 1
+                _ack_item(source, ref)
             except Paywalled as exc:
                 _log.info("backfill %s paywalled url=%s host=%s", sub.name, ref.url, exc.host)
             except RateLimited:

@@ -32,6 +32,7 @@ dependencies = [
     "ebooklib>=0.18",
     "tomli-w>=1.0",
     "textual>=0.86",
+    "imap-tools>=1.13.0",
 ]
 
 [project.scripts]

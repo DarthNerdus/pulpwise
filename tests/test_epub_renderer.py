@@ -181,14 +181,62 @@ def test_render_falls_back_when_image_fetch_fails(tmp_path: Path) -> None:
     assert b"https://example.com/missing.png" in chapter.get_content()
 
 
-def test_render_skips_data_url_images(tmp_path: Path) -> None:
-    """data: URLs are inlined already - don't try to HTTP-fetch them."""
+def test_render_embeds_data_url_images_without_network(tmp_path: Path) -> None:
+    """data: URLs decode straight into EPUB resources - never HTTP-fetched.
+
+    Email newsletters arrive with cid: inline images rewritten to data:
+    URIs by util/email_clean; the renderer turns those into proper EPUB
+    image items because some readers refuse data: srcs in content docs.
+    """
     body = '<img src="data:image/png;base64,iVBORw0KGgo="/>'
     article = RawArticle(
         title="t", body_html=body, canonical_url="https://example.com", source_url="direct"
     )
-    # No client given - if we tried to fetch, we'd hit real network
-    # (or fail in tests where there's no network). data: should be skipped.
+    # No client given - if we tried to fetch, we'd hit real network.
+    out_bytes = EpubRenderer().render(article)
+    out = tmp_path / "out.epub"
+    out.write_bytes(out_bytes)
+    book = epub.read_epub(str(out))
+    images = list(book.get_items_of_type(ITEM_IMAGE))
+    assert len(images) == 1
+    assert images[0].file_name == "images/img001.png"
+
+    chapter = next(
+        item for item in book.get_items() if getattr(item, "file_name", "") == "article.xhtml"
+    )
+    assert b"images/img001.png" in chapter.get_content()
+    assert b"data:image/png" not in chapter.get_content()
+
+
+def test_render_scrubs_control_characters_from_metadata() -> None:
+    """Email subjects become titles; lxml refuses XML-incompatible control
+    chars, so a hostile/garbled Subject must not crash serialization."""
+    article = RawArticle(
+        title="Bad\x0cSubject \x00here",
+        body_html="<p>x</p>",
+        canonical_url="https://example.com",
+        source_url="direct",
+        author="A\x08B",
+    )
+    out_bytes = EpubRenderer().render(article)
+    assert out_bytes[:2] == b"PK"
+
+
+def test_render_survives_malformed_image_url() -> None:
+    """One broken <img src> must stay fail-soft, not kill the whole render."""
+    body = '<p>ok</p><img src="https://exa mple.com/x.png"/>'
+    article = RawArticle(
+        title="t", body_html=body, canonical_url="https://example.com", source_url="direct"
+    )
+    out_bytes = EpubRenderer().render(article)
+    assert out_bytes[:2] == b"PK"
+
+
+def test_render_leaves_undecodable_data_uris_alone(tmp_path: Path) -> None:
+    body = '<img src="data:image/tiff;base64,AAAA"/>'  # unknown content-type
+    article = RawArticle(
+        title="t", body_html=body, canonical_url="https://example.com", source_url="direct"
+    )
     out_bytes = EpubRenderer().render(article)
     out = tmp_path / "out.epub"
     out.write_bytes(out_bytes)

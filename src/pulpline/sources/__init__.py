@@ -8,6 +8,7 @@ from __future__ import annotations
 from pulpline.sources.annas import AnnaSource
 from pulpline.sources.arxiv import ArXivSource
 from pulpline.sources.base import Source
+from pulpline.sources.email import EmailSource
 from pulpline.sources.mangadex import MangaDexSource
 from pulpline.sources.rss import RSSSource
 from pulpline.sources.substack import SubstackSavedSource, SubstackSource
@@ -21,6 +22,7 @@ REGISTRY: dict[str, type[Source]] = {
     ArXivSource.name: ArXivSource,
     MangaDexSource.name: MangaDexSource,
     AnnaSource.name: AnnaSource,
+    EmailSource.name: EmailSource,
 }
 
 
@@ -46,6 +48,7 @@ __all__ = [
     "REGISTRY",
     "AnnaSource",
     "ArXivSource",
+    "EmailSource",
     "MangaDexSource",
     "RSSSource",
     "Source",

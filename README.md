@@ -367,6 +367,90 @@ renderer also downloads and embeds inline `<img>` content, so articles
 read without internet on the device - if the post had figures, they're
 in the file.
 
+## Email: ePub attachments + newsletters
+
+Point pulpline at an IMAP mailbox and it treats the mailbox as a feed.
+Every message is dispatched on its own merits:
+
+- **Message has an ebook attachment** (epub/pdf/mobi/azw/cbz/...): the
+  attachment is saved verbatim, one file per attachment. The email body is
+  treated as a delivery envelope and ignored. This covers Calibre's
+  "share by email", fanfic-site delivery bots, and forwarding books to
+  yourself.
+- **Anything else**: the HTML body is cleaned (tracking pixels, hidden
+  preview text, and layout tables stripped; inline images embedded) and
+  rendered to EPUB - so newsletters read like articles on the device.
+  Text-only emails are skipped with an error; there's nothing to render.
+
+The intended setup is a **dedicated mailbox** (a separate account, or a
+folder that a mail filter routes into) so everything in it is meant for
+the reader.
+
+### Setup
+
+```bash
+# 1. Create an app password for the account (Gmail: enable 2FA, then
+#    https://myaccount.google.com/apppasswords). Save it to a file:
+mkdir -p ~/.config/pulpline
+printf '%s' 'abcd efgh ijkl mnop' > ~/.config/pulpline/email_password
+chmod 600 ~/.config/pulpline/email_password
+
+# 2. Add the auth block to ~/.config/pulpline/config.toml:
+#    [auth.email]
+#    username = "you@gmail.com"
+#    password_path = "~/.config/pulpline/email_password"
+
+# 3. Subscribe. The URL is imaps://<host>/<folder> - folder omitted = INBOX.
+pulp add imaps://imap.gmail.com/Pulpline
+
+# 4. Sync as usual.
+pulp sync
+```
+
+A ready-to-copy config block with every option lives in
+[`examples/email.toml`](examples/email.toml).
+
+The password never goes in `config.toml` - only the *path* to it (or set
+`PULPLINE_EMAIL_PASSWORD` in the environment, which wins over the file).
+`imaps://` means verified TLS on port 993; `imap://host` means STARTTLS
+on 143.
+
+### Options
+
+Set under `[subscriptions.options]`:
+
+| option        | default  | meaning                                                                 |
+| ------------- | -------- | ----------------------------------------------------------------------- |
+| `since_days`  | `60`     | how far back discovery looks. `0` = the whole folder every sync.        |
+| `mark_read`   | `"seen"` | `"seen"` marks processed mail read, `"move"` moves it to `move_to`, `"none"` leaves the mailbox untouched. |
+| `move_to`     | -        | destination folder, required with `mark_read = "move"`. Must exist.     |
+| `unseen_only` | `0`      | `1` = only look at unread mail. A prefilter, not the dedup mechanism.   |
+| `prefer_web`  | `0`      | `1` = follow the newsletter's "view in browser" link and extract the web version (better typography, but fetches over HTTP). |
+
+### How it stays idempotent
+
+Already-processed messages are tracked in pulpline's own ledger, keyed on
+the email's `Message-ID` - **not** on the IMAP read flag. Your phone
+marking the mailbox read (or a crash halfway through a sync) never causes
+missed or duplicated books: anything not yet in the ledger is picked up
+again on the next sync. `mark_read` runs only *after* an item is safely
+recorded, purely so the mailbox reflects progress when you look at it.
+
+Two consequences worth knowing:
+
+- Deleting an EPUB from the library (TUI `d`) won't resurrect it on the
+  next sync, same as every other source.
+- A message that fails repeatedly (say, a malformed newsletter) stays
+  unread in the mailbox and retries each sync until it ages out of the
+  `since_days` window. `pulp backfill <name>` reaches past the window -
+  it walks the entire folder newest-first, which is also the way to
+  ingest a mailbox's whole history on day one.
+
+Newsletter EPUBs are titled `Subject - Sender`. When two issues share a
+subject line (looking at you, "Money Stuff"), the file gets the issue's
+date appended (`Money Stuff (2026-07-03).epub`) instead of overwriting
+the previous one.
+
 ## File organization + deletion
 
 Pulpline lays out items in subfolders under your `output_dir`:
