@@ -121,15 +121,20 @@ def add_once(
     sources (Anna's Archive's API key) work on the one-shot path. Loaded
     lazily from disk if not passed.
 
+    Destination: `<base>/oneshots/`, where base is the `output_dir` arg,
+    else `PULPLINE_OUTPUT_DIR`, else the config's `paths.output_dir`. A
+    source-level `output_dir` override (Anna's `[auth.annas].output_dir`)
+    wins over all of it - that's the user naming a destination for the
+    source specifically.
+
     If `url` has already been ingested, returns the existing path without
     re-fetching. Re-runs are idempotent.
     """
-    base = (output_dir or default_output_dir()).expanduser()
-    target = base / "oneshots"
+    cfg = config if config is not None else load_config()
+    base = (output_dir or default_output_dir(cfg)).expanduser()
     key = dedup_key(url)
 
     source_cls = pick_source_for_url(url)
-    cfg = config if config is not None else load_config()
 
     _log.info("add_once start url=%s source=%s", url, source_cls.name)
 
@@ -148,7 +153,7 @@ def add_once(
             article = source.fetch(refs[0])
             content = source.render(article)
 
-        sink = FilesystemSink(target)
+        sink = FilesystemSink(source.output_dir or base / "oneshots")
         path = sink.write(article, content, source.extension)
 
         record_item(

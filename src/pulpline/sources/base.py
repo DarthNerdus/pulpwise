@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
+from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Self
 from urllib.parse import urlsplit
 
@@ -55,6 +56,15 @@ class Source(ABC):
         MangaDex's `/feed` returns `total` indicating chapter count). The
         pipeline reads this after discover and persists it via
         `update_subscription_state(total_items=...)`.
+        """
+        self.output_dir: Path | None = None
+        """Optional source-level output directory override.
+
+        None (default) lets the pipeline pick the destination. Sources whose
+        config names an explicit destination (Anna's Archive's
+        `[auth.annas].output_dir`) set an expanded absolute path here in
+        `from_config`; `add_once` then writes there instead of
+        `<output_dir>/oneshots/`.
         """
 
     @property

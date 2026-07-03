@@ -10,6 +10,9 @@ Search lives in `searchers.annas.AnnaSearcher`; this module is only the
 URL-routed download path. `pulp add https://annas-archive.<tld>/md5/<hash>`
 hits this code as a one-shot, and so does the search-pick flow once the
 user picks a result.
+
+`[auth.annas].output_dir` optionally routes downloads to a dedicated folder
+instead of the shared `<output_dir>/oneshots/`.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import re
 import urllib.parse
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 from urllib.parse import urlsplit
 
@@ -67,10 +71,12 @@ class AnnaSource(Source):
         client: httpx.Client | None = None,
         api_key: str | None = None,
         mirrors: tuple[str, ...] = DEFAULT_MIRRORS,
+        output_dir: Path | None = None,
     ) -> None:
         super().__init__(client=client)
         self._api_key = api_key
         self._mirrors = mirrors
+        self.output_dir = output_dir
         # Pipeline reads `source.extension`; we override the inherited
         # ClassVar with an instance attribute so we can update it once
         # fast_download.json reveals the real file type. Default "epub"
@@ -131,7 +137,9 @@ class AnnaSource(Source):
             if isinstance(mirrors_raw, str) and mirrors_raw
             else discover_anna_mirrors()
         )
-        return cls(client=client, api_key=api_key, mirrors=mirrors)
+        out_raw = auth.get("output_dir")
+        output_dir = Path(out_raw).expanduser() if isinstance(out_raw, str) and out_raw else None
+        return cls(client=client, api_key=api_key, mirrors=mirrors, output_dir=output_dir)
 
     def discover(self, target_url: str) -> Iterable[ItemRef]:
         md5 = _md5_from_url(target_url)

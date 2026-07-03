@@ -1,0 +1,23 @@
+# Anna's Archive: copy the block into ~/.config/pulpline/config.toml.
+#
+# Anna's is search + one-shot downloads, not a subscription - there is no
+# [[subscriptions]] block. `pulp search anna "..."` and
+# `pulp add https://annas-archive.<tld>/md5/<hash>` both use this auth table.
+#
+# Downloads go through the donation-gated fast_download.json API. Get a key
+# by donating at https://annas-archive.li/donate. Never commit a config with
+# a real key; the PULPLINE_ANNAS_API_KEY environment variable, when set,
+# wins over this file.
+
+[auth.annas]
+api_key = "..."
+
+# Optional: comma-separated mirror TLDs. If unset, pulpline asks SLUM
+# (https://open-slum.org/) which mirrors are currently up and caches the
+# answer for 24h.
+# mirrors = "gl, pk, gd"
+
+# Optional: where Anna's downloads land. If unset they go to
+# <paths.output_dir>/oneshots/ alongside other one-shot ingests; set this
+# to keep books in their own folder.
+# output_dir = "~/Books"

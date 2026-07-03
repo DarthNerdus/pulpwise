@@ -108,11 +108,17 @@ def default_config_path() -> Path:
     return Path.home() / ".config" / "pulpline" / "config.toml"
 
 
-def default_output_dir() -> Path:
-    """Compatibility shim used by `add_once` when no config has been loaded."""
+def default_output_dir(cfg: Config | None = None) -> Path:
+    """Base output dir for one-shots: env override, then config, then default.
+
+    `PULPLINE_OUTPUT_DIR` wins so tests / CI can redirect output without a
+    config file; otherwise a loaded config's `paths.output_dir` is honored.
+    """
     override = os.environ.get("PULPLINE_OUTPUT_DIR")
     if override:
         return Path(override).expanduser()
+    if cfg is not None:
+        return Path(cfg.paths.output_dir).expanduser()
     return Path(DEFAULT_OUTPUT_DIR).expanduser()
 
 

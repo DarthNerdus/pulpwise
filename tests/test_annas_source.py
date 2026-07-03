@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import httpx
 import pytest
 
@@ -196,6 +198,15 @@ def test_from_config_reads_api_key_and_mirrors() -> None:
     source = AnnaSource.from_config(cfg)
     assert source._api_key == FAKE_KEY
     assert source._mirrors == ("gl", "pk")
+    assert source.output_dir is None
+
+
+def test_from_config_reads_output_dir_expanded() -> None:
+    cfg = Config(
+        auth={"annas": {"api_key": FAKE_KEY, "mirrors": "gl", "output_dir": "~/Books/annas"}}
+    )
+    source = AnnaSource.from_config(cfg)
+    assert source.output_dir == Path("~/Books/annas").expanduser()
 
 
 def test_from_config_without_mirrors_consults_slum(monkeypatch: pytest.MonkeyPatch) -> None:

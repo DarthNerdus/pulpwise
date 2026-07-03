@@ -237,8 +237,8 @@ pulp search anna "transformers" --content paper
 
 Pulpline shows a numbered list of hits with title, authors, year, language,
 format, and size. Pick a number to download; the file lands in
-`<output_dir>/oneshots/` and gets recorded in the items ledger so re-runs
-are deduped.
+`<output_dir>/oneshots/` (or `[auth.annas].output_dir` if set - see below)
+and gets recorded in the items ledger so re-runs are deduped.
 
 Filters: `--content` (`book` default, `paper`, `comic`, `magazine`),
 `--ext` (`epub`, `pdf`, `mobi`, ...), `--lang` (ISO codes: `en`, `ru`,
@@ -256,11 +256,17 @@ in your config (never in a git repo):
 ```toml
 [auth.annas]
 api_key = "..."                              # required
-mirrors = ["gl", "pk", "gd"]                 # optional; if unset, pulpline asks SLUM
+mirrors = "gl, pk, gd"                       # optional; if unset, pulpline asks SLUM
+output_dir = "~/Books"                       # optional; see below
 ```
 
 Or set `PULPLINE_ANNAS_API_KEY` in the environment if you'd rather keep it
 out of files.
+
+When `[auth.annas].output_dir` is set, Anna's downloads land there instead
+of the shared `<output_dir>/oneshots/` folder - handy for keeping books
+separate from one-off article ingests. Everything else (dedup ledger, TUI
+delete) works the same regardless of where the file lives.
 
 When `[auth.annas].mirrors` is unset, pulpline queries [SLUM](https://open-slum.org/)
 (the Shadow Library Uptime Monitor) on first use to learn which mirrors
