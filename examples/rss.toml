@@ -1,0 +1,40 @@
+# RSS subscriptions: copy the blocks you need into ~/.config/pulpline/config.toml.
+#
+# A plain feed subscription needs no options - `pulp add <feed-url>` writes
+# this block for you:
+
+[[subscriptions]]
+name = "stratechery"
+source = "rss"
+url = "https://stratechery.com/feed"
+
+# --- category filtering --------------------------------------------------------
+#
+# Feeds that mix content types often tag entries with categories (RSS
+# <category>, Atom <category term=...>, <dc:subject>). Filter on them with
+# comma-separated, case-insensitive lists:
+#
+#   categories         - allow-list: only entries carrying at least one listed
+#                        category are ingested. Untagged entries are skipped.
+#   exclude_categories - drop-list: entries carrying any listed category are
+#                        skipped; untagged entries still come through. Wins
+#                        over `categories` when both match.
+#
+# Filtering happens at discovery, so skipped entries are never fetched and
+# never enter the dedup ledger.
+
+[[subscriptions]]
+name = "badlogic-links"
+source = "rss"
+url = "https://badlogic-list.lakebed.app/rss"
+
+[subscriptions.options]
+categories = "Recommended Reading"       # skip "Recommended Viewing" entries
+
+# [[subscriptions]]
+# name = "some-magazine"
+# source = "rss"
+# url = "https://magazine.example.com/feed"
+#
+# [subscriptions.options]
+# exclude_categories = "Sponsored, Podcast"

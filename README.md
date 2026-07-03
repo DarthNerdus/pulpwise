@@ -53,6 +53,32 @@ pulp remove simon-willison-s-weblog
 
 `pulp add` auto-classifies each URL: real feeds get subscribed, single articles get one-shot. Use `--once` or `--feed` to override for the whole call. Errors on one URL do not abort the rest of the batch.
 
+### Filtering a feed by category
+
+Feeds that mix content types often tag entries with categories (RSS
+`<category>`, Atom `<category term=...>`, `<dc:subject>`). Two per-subscription
+options filter on them — edit the subscription in `config.toml`:
+
+```toml
+[[subscriptions]]
+name = "badlogic-links"
+source = "rss"
+url = "https://badlogic-list.lakebed.app/rss"
+
+[subscriptions.options]
+categories = "Recommended Reading"          # only entries with a listed category
+# exclude_categories = "Sponsored, Podcast" # drop entries with a listed category
+```
+
+Both take comma-separated category names, matched case-insensitively against
+each entry's full category list. `categories` is an allow-list: entries
+without any listed category are skipped, including untagged entries.
+`exclude_categories` is a drop-list: it only removes matches, so untagged
+entries still come through — and it wins when both options match the same
+entry. Filtering happens at discovery, so skipped entries are never fetched
+and never enter the dedup ledger; if you loosen the filter later, previously
+skipped entries still in the feed are picked up on the next sync.
+
 ## TUI
 
 For a more interactive view of your library and ingestion stats:

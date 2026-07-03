@@ -5,6 +5,10 @@ yields N ItemRefs), the orchestrator dedups against the items table, and
 `fetch` is only invoked for unseen items. When the feed itself ships full
 article bodies (`<content:encoded>` for RSS, Atom `content[type=html]`) we use
 them directly; otherwise we fetch the article URL and run trafilatura.
+
+Per-subscription `categories` / `exclude_categories` options filter entries by
+their feed categories during `discover`, so filtered-out items never reach
+`fetch` or the dedup ledger.
 """
 
 from __future__ import annotations
@@ -12,7 +16,7 @@ from __future__ import annotations
 import time
 from collections.abc import Iterable
 from datetime import UTC, datetime
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import urlsplit
 
 import feedparser
@@ -21,6 +25,9 @@ import httpx
 from pulpline.models import ExtractionError, FetchError, ItemRef, RawArticle
 from pulpline.sources.base import Source
 from pulpline.util.extract import fetch_article
+
+if TYPE_CHECKING:
+    from pulpline.config import Config, Subscription
 
 # Feed-supplied bodies shorter than this fall through to a fresh trafilatura
 # fetch on the article URL. Below ~600 chars feeds almost always carry just a
@@ -31,11 +38,33 @@ _MIN_FEED_BODY_LEN = 600
 class RSSSource(Source):
     name: ClassVar[str] = "rss"
 
-    def __init__(self, client: httpx.Client | None = None) -> None:
+    def __init__(
+        self,
+        client: httpx.Client | None = None,
+        categories: frozenset[str] | None = None,
+        exclude_categories: frozenset[str] | None = None,
+    ) -> None:
         super().__init__(client=client)
         self._entries: dict[str, dict[str, Any]] = {}
         self._feed_url: str = ""
         self._feed_title: str | None = None
+        self._categories = categories
+        self._exclude_categories = exclude_categories
+
+    @classmethod
+    def from_config(
+        cls,
+        cfg: Config,
+        client: httpx.Client | None = None,
+        subscription: Subscription | None = None,
+    ) -> RSSSource:
+        del cfg
+        opts = subscription.options if subscription is not None else {}
+        return cls(
+            client=client,
+            categories=_parse_category_option(opts.get("categories")),
+            exclude_categories=_parse_category_option(opts.get("exclude_categories")),
+        )
 
     def discover(self, target_url: str) -> Iterable[ItemRef]:
         self._feed_url = target_url
@@ -54,6 +83,8 @@ class RSSSource(Source):
         for entry in feed.entries:
             link = entry.get("link")
             if not link:
+                continue
+            if not self._passes_category_filter(entry):
                 continue
             self._entries[link] = entry
             yield ItemRef(
@@ -78,6 +109,43 @@ class RSSSource(Source):
         # Fall back to fetching + extracting the article page. Feed URL still
         # wins as `dc:source` so the EPUB records which feed delivered it.
         return fetch_article(ref.url, self.client, source_url=self._feed_url or "direct")
+
+    def _passes_category_filter(self, entry: dict[str, Any]) -> bool:
+        if self._categories is None and self._exclude_categories is None:
+            return True
+        entry_categories = _entry_categories(entry)
+        if self._exclude_categories and entry_categories & self._exclude_categories:
+            return False
+        if self._categories is not None:
+            return bool(entry_categories & self._categories)
+        return True
+
+
+def _parse_category_option(value: str | int | None) -> frozenset[str] | None:
+    """Parse a comma-separated category option into a lowercase set, or None if unset.
+
+    None (option absent or blank) means "no constraint"; an empty set from
+    `categories = ","` would silently drop everything, so blanks collapse to
+    None rather than an empty filter.
+    """
+    if value is None:
+        return None
+    names = frozenset(name.strip().lower() for name in str(value).split(",") if name.strip())
+    return names or None
+
+
+def _entry_categories(entry: dict[str, Any]) -> frozenset[str]:
+    """Lowercased category names for a feed entry.
+
+    feedparser normalizes RSS `<category>`, Atom `<category term=...>`, and
+    `<dc:subject>` into `entry.tags[].term`.
+    """
+    names = set()
+    for tag in entry.get("tags", []) or []:
+        term = tag.get("term") if isinstance(tag, dict) else None
+        if term:
+            names.add(str(term).strip().lower())
+    return frozenset(names)
 
 
 def _body_from_entry(entry: dict[str, Any]) -> str | None:
