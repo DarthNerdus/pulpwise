@@ -1,0 +1,69 @@
+# Email source: copy the blocks you need into ~/.config/pulpline/config.toml.
+#
+# The mailbox is treated as a feed. Messages with ebook attachments
+# (epub/pdf/mobi/azw/azw3/fb2/cbz/cbr/djvu) have each attachment saved
+# verbatim; every other message must be an HTML email, which is cleaned and
+# rendered to EPUB. Idempotency is tracked in pulpline's ledger by
+# Message-ID, so IMAP read flags are never load-bearing.
+
+# --- credentials (one account, shared by all email subscriptions) -----------
+#
+# The password itself never lives in this file. Point password_path at a
+# chmod-600 file containing an app password (Gmail: enable 2FA, then create
+# one at https://myaccount.google.com/apppasswords):
+#
+#   printf '%s' 'abcd efgh ijkl mnop' > ~/.config/pulpline/email_password
+#   chmod 600 ~/.config/pulpline/email_password
+#
+# The PULPLINE_EMAIL_PASSWORD environment variable, when set, wins over the
+# file (useful for CI or secret managers). An inline `password = "..."` key
+# also works but is discouraged.
+
+[auth.email]
+username = "you@gmail.com"
+password_path = "~/.config/pulpline/email_password"
+
+# --- minimal subscription ----------------------------------------------------
+#
+# url shape: imaps://<host>[:port]/<folder>
+#   - imaps:// = TLS on 993 (certificate-verified). imap:// = STARTTLS on 143.
+#   - folder omitted = INBOX. Escape spaces: imaps://host/Books%20Inbox
+#   - credentials never go in the URL.
+
+[[subscriptions]]
+name = "mailbox"
+source = "email"
+url = "imaps://imap.gmail.com/Pulpline"
+
+# --- all the knobs -----------------------------------------------------------
+
+# [[subscriptions]]
+# name = "mailbox"
+# source = "email"
+# url = "imaps://imap.gmail.com/Pulpline"
+# output_dir = "~/Sync/Pulpline/Mail"   # optional; default <output_dir>/<name>/
+#
+# [subscriptions.options]
+# since_days = 60          # discovery window; 0 = whole folder every sync.
+#                          # Use `pulp backfill mailbox` to ingest history
+#                          # beyond the window (walks the folder newest-first).
+# mark_read = "seen"       # "seen" (default) | "move" | "none"
+#                          # Applied only AFTER an item is recorded, so a
+#                          # crash mid-sync never loses mail. Purely cosmetic:
+#                          # dedup lives in pulpline's ledger, not the flag.
+# move_to = "Pulpline/done"  # required when mark_read = "move"; folder must
+#                            # exist and the server must support MOVE
+#                            # (Gmail/Dovecot/Fastmail/Outlook all do)
+# unseen_only = 0          # 1 = only consider unread mail (prefilter only)
+# prefer_web = 0           # 1 = follow "view in browser" links and extract the
+#                          # web version instead of the email HTML
+
+# --- two folders, one account -----------------------------------------------
+#
+# Point a second subscription at another folder for separate library
+# sections (mail filters do the routing). Both share [auth.email].
+
+# [[subscriptions]]
+# name = "newsletters"
+# source = "email"
+# url = "imaps://imap.gmail.com/Newsletters"
