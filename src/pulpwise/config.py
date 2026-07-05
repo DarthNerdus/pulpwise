@@ -183,7 +183,10 @@ def _auth_from_raw(raw: object) -> dict[str, dict[str, str | list[str]]]:
 
     Strings cover the common cases (`token`, `cookies_path`); lists of
     strings cover the rare multi-value case (`extra_cookies_paths` for
-    Substack publications on multiple custom domains). Core code stays
+    Substack publications on multiple custom domains). TOML booleans are
+    accepted and normalized to "true"/"false" strings, so flag-shaped
+    settings (`auto_reconcile = true`) can be written the natural way
+    without widening the value type consumers see. Core code stays
     source-agnostic.
     """
     if not isinstance(raw, dict):
@@ -194,7 +197,11 @@ def _auth_from_raw(raw: object) -> dict[str, dict[str, str | list[str]]]:
             raise ConfigError(f"`auth.{source_name}` must be a table")
         validated: dict[str, str | list[str]] = {}
         for k, v in sub.items():
-            if isinstance(v, str):
+            # bool before str: not a str subclass, but check explicitly for
+            # clarity (bool IS an int subclass, and ints are rejected here).
+            if isinstance(v, bool):
+                validated[k] = "true" if v else "false"
+            elif isinstance(v, str):
                 validated[k] = v
             elif isinstance(v, list) and all(isinstance(item, str) for item in v):
                 validated[k] = list(v)

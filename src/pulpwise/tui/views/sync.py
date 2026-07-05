@@ -22,7 +22,11 @@ from textual.containers import Vertical
 from textual.widgets import Static
 
 from pulpwise.config import ConfigError, Subscription, load_config
-from pulpwise.importers.substack import SubstackAutoOutcome, auto_reconcile
+from pulpwise.importers.substack import (
+    SubstackAutoOutcome,
+    auto_reconcile,
+    auto_reconcile_enabled,
+)
 from pulpwise.models import ExtractionError, FetchError
 from pulpwise.pipeline import (
     ProgressReporter,
@@ -141,13 +145,17 @@ class SyncView(View):
     def _do_sync(self) -> None:
         try:
             cfg = load_config()
-            # Auto-reconcile substack follows so a publication you just
-            # subscribed-to on your phone joins the sync without a separate
-            # `pulpwise import substack --auto` step. Failures (expired cookies,
-            # network blip) are surfaced as notifications but do not block
-            # the actual sync, which is the higher-value operation.
-            cfg, auto = auto_reconcile(cfg)
-            self._notify_auto_outcome(auto)
+            # Substack follow-list reconciliation is OPT-IN
+            # ([auth.substack].auto_reconcile = true): it silently adds
+            # every followed publication that isn't already a subscription,
+            # which on a fresh config means the entire follow list - a mass
+            # side effect nobody should get from just pressing sync. The
+            # explicit path is `pulpwise import substack` (--auto for cron).
+            # When enabled, failures (expired cookies, network blip) are
+            # surfaced as notifications but do not block the actual sync.
+            if auto_reconcile_enabled(cfg):
+                cfg, auto = auto_reconcile(cfg)
+                self._notify_auto_outcome(auto)
             reporter = _TuiProgress(self)
             total = pipeline_sync(config=cfg, progress=reporter)
         except (FetchError, ExtractionError) as exc:

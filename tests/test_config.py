@@ -64,6 +64,31 @@ def test_auth_readwise_round_trip(tmp_path: Path) -> None:
     assert reloaded.auth_for("nonexistent") == {}
 
 
+def test_auth_toml_booleans_normalize_to_strings(tmp_path: Path) -> None:
+    """Flag-shaped auth settings (`auto_reconcile = true`) can be written as
+    natural TOML booleans; the loader normalizes them to "true"/"false"
+    strings so consumers keep seeing str | list[str]."""
+    target = tmp_path / "config.toml"
+    target.write_text(
+        '[auth.substack]\ncookies_path = "~/c.json"\nauto_reconcile = true\nother = false\n',
+        encoding="utf-8",
+    )
+
+    loaded = load_config(target)
+    assert loaded.auth_for("substack")["auto_reconcile"] == "true"
+    assert loaded.auth_for("substack")["other"] == "false"
+
+
+def test_auth_integers_still_rejected(tmp_path: Path) -> None:
+    """bool is an int subclass; make sure accepting bools didn't quietly
+    start accepting real integers."""
+    target = tmp_path / "config.toml"
+    target.write_text("[auth.substack]\nauto_reconcile = 1\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=r"auth\.substack\.auto_reconcile"):
+        load_config(target)
+
+
 # ---- legacy pulpline keys ---------------------------------------------------------
 
 

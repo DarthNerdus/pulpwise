@@ -285,6 +285,16 @@ publications without ever opening a prompt:
 */30 * * * *  pulpwise import substack --auto && pulpwise sync
 ```
 
+Reconciliation only ever runs when you invoke it. The TUI can also run it
+automatically before each sync, but that is **opt-in** - on a fresh config
+it would silently add your entire Substack follow list, so it's off unless
+you ask for it:
+
+```toml
+[auth.substack]
+auto_reconcile = true    # TUI sync also reconciles follows first
+```
+
 ### Custom-domain publications (ACX, etc.)
 
 Some Substack publications run on their own domain (e.g.

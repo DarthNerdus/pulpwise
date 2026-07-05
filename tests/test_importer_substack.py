@@ -13,9 +13,41 @@ from pulpwise.config import Config, Subscription, load_config
 from pulpwise.importers.substack import (
     SubstackPublication,
     auto_reconcile,
+    auto_reconcile_enabled,
     list_user_subscriptions,
     parse_selection,
 )
+
+# ---- auto_reconcile_enabled (the TUI's opt-in gate) ------------------------------
+
+
+@pytest.mark.parametrize("value", ["true", "1", "yes", "ON", " True "])
+def test_auto_reconcile_enabled_truthy_strings(value: str) -> None:
+    cfg = Config(auth={"substack": {"auto_reconcile": value}})
+    assert auto_reconcile_enabled(cfg) is True
+
+
+@pytest.mark.parametrize("value", ["false", "0", "no", "", "later"])
+def test_auto_reconcile_enabled_falsy_strings(value: str) -> None:
+    cfg = Config(auth={"substack": {"auto_reconcile": value}})
+    assert auto_reconcile_enabled(cfg) is False
+
+
+def test_auto_reconcile_disabled_by_default() -> None:
+    """The dangerous default: unset means OFF. A fresh config must never
+    mass-add the user's whole Substack follow list from a TUI sync."""
+    assert auto_reconcile_enabled(Config()) is False
+    assert (
+        auto_reconcile_enabled(
+            Config(auth={"substack": {"username": "u", "cookies_path": "/tmp/c"}})
+        )
+        is False
+    )
+
+
+def test_auto_reconcile_enabled_ignores_non_string_values() -> None:
+    cfg = Config(auth={"substack": {"auto_reconcile": ["true"]}})
+    assert auto_reconcile_enabled(cfg) is False
 
 
 def _profile_payload() -> dict[str, Any]:

@@ -26,9 +26,14 @@ __all__ = [
     "SubstackAutoOutcome",
     "SubstackPublication",
     "auto_reconcile",
+    "auto_reconcile_enabled",
     "list_user_subscriptions",
     "parse_selection",
 ]
+
+# Config values (of `[auth.substack].auto_reconcile`) read as "on". TOML
+# booleans are normalized to "true"/"false" strings by the config loader.
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +115,21 @@ def _slug_from_title(text: str) -> str:
     """Lowercased alphanumeric+hyphen slug suitable as a subscription name."""
     s = _SLUG_NON_ALNUM.sub("-", text.lower()).strip("-")
     return s or "feed"
+
+
+def auto_reconcile_enabled(config: Config) -> bool:
+    """True when the user opted into background follow-list reconciliation.
+
+    Controlled by `[auth.substack].auto_reconcile` (`true`, or the strings
+    "1"/"yes"/"on"). Default OFF: silently adding every followed publication
+    as a subscription is a mass side effect nobody should get from just
+    pressing sync - with a fresh config it re-adds the user's *entire*
+    follow list. The explicit paths (`pulpwise import substack`, and
+    `--auto` for cron) work regardless of this setting; it gates only the
+    TUI's convenience pass before sync.
+    """
+    value = config.auth_for("substack").get("auto_reconcile")
+    return isinstance(value, str) and value.strip().lower() in _TRUTHY
 
 
 def auto_reconcile(

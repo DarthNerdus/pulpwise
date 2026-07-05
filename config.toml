@@ -1,0 +1,13 @@
+[paths]
+
+[auth.substack]
+cookies_path = "/home/darthy/.config/pulpwise/substack-cookies.json"
+username = "jesseread"
+
+[auth.readwise]
+token = "vToTKsNB8bZnNxPCrbIizsANE88xv8kZN0PdYR3qcsJWSdi5qj"
+
+[[subscriptions]]
+name = "substack-saves"
+source = "substack-saved"
+url = "https://substack.com/inbox/saved"
