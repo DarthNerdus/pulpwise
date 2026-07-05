@@ -11,3 +11,8 @@ token = "vToTKsNB8bZnNxPCrbIizsANE88xv8kZN0PdYR3qcsJWSdi5qj"
 name = "substack-saves"
 source = "substack-saved"
 url = "https://substack.com/inbox/saved"
+
+[[subscriptions]]
+name = "commonplace-philosophy"
+source = "substack"
+url = "https://jaredhenderson.substack.com"

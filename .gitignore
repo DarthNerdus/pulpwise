@@ -36,3 +36,4 @@ Thumbs.db
 # mise: per-machine overrides stay local
 mise.local.toml
 .mise.local.toml
+state.db
