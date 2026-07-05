@@ -32,3 +32,7 @@ coverage.xml
 # OS
 .DS_Store
 Thumbs.db
+
+# mise: per-machine overrides stay local
+mise.local.toml
+.mise.local.toml

@@ -537,7 +537,15 @@ make typecheck
 make build         # wheel + sdist into dist/
 ```
 
-Pulp Wise pins PyPI as its default index. If your shell exports a non-PyPI `UV_INDEX`, the bundled `Makefile` strips it before invoking `uv`. Direnv users can `direnv allow` to get the same effect via `.envrc`.
+[mise](https://mise.jdx.dev) users get the same targets as tasks: `mise
+install` provisions Python 3.14 + uv, then `mise run check` (or `sync`,
+`test`, `lint`, `format`, `typecheck`, `build`). Per-machine overrides go
+in `mise.local.toml`, which is gitignored.
+
+Pulp Wise pins PyPI as its default index. If your shell exports a non-PyPI
+`UV_INDEX`, the bundled `Makefile` strips it before invoking `uv`; the mise
+config blanks it for anything run through mise; and direnv users can
+`direnv allow` to get the same effect via `.envrc`.
 
 ## License
 

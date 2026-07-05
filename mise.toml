@@ -1,0 +1,47 @@
+# mise (mise-en-place) project config - https://mise.jdx.dev
+#
+# `mise install` provisions the toolchain; `mise run check` runs the full
+# gate. The [env] block does the same job as the direnv .envrc and the
+# Makefile's `env -u` prefix: pulpwise pins PyPI as its package index, so a
+# globally-exported pyx.dev UV_INDEX must not leak into uv invocations.
+
+[tools]
+python = "3.14"
+uv = "latest"
+
+[env]
+# mise can't unset variables inherited from the parent shell (`= false`
+# only drops values set by earlier mise layers), so override with empty
+# strings instead: uv parses an empty UV_INDEX as "no extra indexes",
+# which is exactly what unset means. The make targets are independently
+# immune via their `env -u` prefix.
+UV_INDEX = ""
+PYX_API_KEY = ""
+
+[tasks.sync]
+description = "Install runtime + dev dependencies (uv sync)"
+run = "make sync"
+
+[tasks.test]
+description = "Run pytest with the coverage gate"
+run = "make test"
+
+[tasks.lint]
+description = "ruff check + format check"
+run = "make lint"
+
+[tasks.format]
+description = "ruff autofix + reformat"
+run = "make format"
+
+[tasks.typecheck]
+description = "mypy strict"
+run = "make typecheck"
+
+[tasks.check]
+description = "Full gate: lint + typecheck + test"
+run = "make check"
+
+[tasks.build]
+description = "Build wheel + sdist into dist/"
+run = "make build"
