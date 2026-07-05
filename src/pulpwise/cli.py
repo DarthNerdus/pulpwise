@@ -31,7 +31,12 @@ from pulpwise.importers.substack import (
     list_user_subscriptions,
 )
 from pulpwise.models import ExtractionError, FetchError, RateLimited
-from pulpwise.sinks.readwise import SAVE_LOCATIONS, ReadwiseAuthError, ReadwiseSink
+from pulpwise.sinks.readwise import (
+    SAVE_LOCATIONS,
+    ReadwiseAuthError,
+    ReadwiseSink,
+    canonical_location,
+)
 from pulpwise.sources import REGISTRY as _SOURCE_REGISTRY
 from pulpwise.sources import pick_source_for_url
 from pulpwise.sources.rss import RSSSource
@@ -105,8 +110,8 @@ def add(
         None,
         "--location",
         "-l",
-        help="Where saves land in Reader: new, later, archive, or feed. "
-        "Default: feed. On subscribes this persists as options.location.",
+        help="Where saves land in Reader: new (alias: inbox), later, archive, "
+        "or feed. Default: feed. On subscribes this persists as options.location.",
     ),
 ) -> None:
     """Add one or more URLs.
@@ -125,10 +130,12 @@ def add(
     if name is not None and len(urls) > 1:
         typer.echo("--name only applies when adding a single URL.", err=True)
         raise typer.Exit(code=2)
-    if location is not None and location not in SAVE_LOCATIONS:
-        valid = ", ".join(sorted(SAVE_LOCATIONS))
-        typer.echo(f"--location must be one of: {valid}", err=True)
-        raise typer.Exit(code=2)
+    if location is not None:
+        location = canonical_location(location)
+        if location not in SAVE_LOCATIONS:
+            valid = ", ".join(sorted(SAVE_LOCATIONS))
+            typer.echo(f"--location must be one of: {valid} (or inbox)", err=True)
+            raise typer.Exit(code=2)
     # Persisted on subscribes so every future sync routes the same way.
     options: dict[str, str | int] | None = None
     if location is not None:

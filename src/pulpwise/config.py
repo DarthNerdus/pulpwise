@@ -37,7 +37,7 @@ _DEFAULT_CONFIG_TEMPLATE = """# pulpwise config. Edit by hand, or via `pulpwise 
 # url = "https://stratechery.com/feed"
 #
 # [subscriptions.options]
-# location = "feed"           # where saves land in Reader: new | later | archive | feed
+# location = "feed"           # where saves land in Reader: new (alias: inbox) | later | archive | feed
 # tags = "tech, essays"       # comma-separated Reader tags for this subscription
 """
 

@@ -155,6 +155,23 @@ def test_sync_applies_location_and_tags_options(
         assert payload["tags"] == ["tech", "essays"]
 
 
+def test_sync_maps_inbox_location_alias_to_new(
+    mock_client_factory: ClientFactory,
+    fake_readwise: FakeReadwise,
+    readwise_sink: ReadwiseSink,
+) -> None:
+    """`location = "inbox"` in config routes saves to Reader's "new"
+    location - "inbox" is what Reader's UI calls it."""
+    client = mock_client_factory({FEED_URL: _feed()})
+    config = _rss_config(options={"location": "inbox"})
+
+    pipeline.sync(config=config, client=client, sink=readwise_sink)
+
+    assert fake_readwise.save_payloads  # sanity: something was pushed
+    for payload in fake_readwise.save_payloads:
+        assert payload["location"] == "new"
+
+
 def test_sync_defaults_to_feed_location(
     mock_client_factory: ClientFactory,
     fake_readwise: FakeReadwise,

@@ -68,7 +68,7 @@ url = "imaps://imap.gmail.com/Pulpwise"
 #                          # fetches the web version - usually better typography)
 #                          # instead of pushing the cleaned email body. Falls
 #                          # back to the email body when no permalink exists.
-# location = "new"         # where saves land in Reader: new | later | archive | feed (default: feed)
+# location = "new"         # where saves land in Reader: new (alias: inbox) | later | archive | feed (default: feed)
 # tags = "newsletters"     # comma-separated Reader tags for this subscription
 
 # --- two folders, one account -----------------------------------------------

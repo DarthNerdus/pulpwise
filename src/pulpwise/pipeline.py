@@ -30,7 +30,12 @@ from pulpwise.models import (
     RateLimited,
     ReaderSubmission,
 )
-from pulpwise.sinks.readwise import SAVE_LOCATIONS, ReadwiseAuthError, ReadwiseSink
+from pulpwise.sinks.readwise import (
+    SAVE_LOCATIONS,
+    ReadwiseAuthError,
+    ReadwiseSink,
+    canonical_location,
+)
 from pulpwise.sources import get_source, pick_source_for_url
 from pulpwise.sources.base import Source
 from pulpwise.state import (
@@ -105,7 +110,8 @@ def _already_ingested_as(
 def _push_options(sub: Subscription) -> tuple[str, tuple[str, ...]]:
     """Parse the Readwise routing options off a subscription.
 
-    `location` says where saves land in Reader (new/later/archive/feed),
+    `location` says where saves land in Reader (new/later/archive/feed;
+    "inbox" is accepted as an alias for "new", matching Reader's UI name),
     defaulting to `DEFAULT_LOCATION` (the Feed section) when unset. `tags`
     is a comma-separated list applied to every document this subscription
     pushes. Raises ConfigError on junk so the subscription fails visibly
@@ -114,6 +120,8 @@ def _push_options(sub: Subscription) -> tuple[str, tuple[str, ...]]:
     location_raw = sub.option("location")
     location = DEFAULT_LOCATION
     if location_raw is not None:
+        if isinstance(location_raw, str):
+            location_raw = canonical_location(location_raw)
         if not isinstance(location_raw, str) or location_raw not in SAVE_LOCATIONS:
             raise ConfigError(
                 f"subscription {sub.name!r}: options.location must be one of "

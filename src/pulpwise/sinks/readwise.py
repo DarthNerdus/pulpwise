@@ -54,6 +54,19 @@ TOKEN_ENV_VAR = "PULPWISE_READWISE_TOKEN"
 #: as a list filter - documents cannot be created there.
 SAVE_LOCATIONS = frozenset({"new", "later", "archive", "feed"})
 
+#: User-facing spellings accepted anywhere a location is configured. Reader's
+#: UI calls the "new" location "Inbox", so let config/CLI say that too.
+LOCATION_ALIASES = {"inbox": "new"}
+
+
+def canonical_location(value: str) -> str:
+    """Map a user-facing location alias ("inbox") to its API name ("new").
+
+    Unknown values pass through unchanged - validation against
+    `SAVE_LOCATIONS` stays the caller's job.
+    """
+    return LOCATION_ALIASES.get(value, value)
+
 # Reader allows 50 saves/min per token; pace at 45/min so a long backfill
 # never trips the limiter in the first place.
 _SAVE_MIN_INTERVAL = 60.0 / 45.0

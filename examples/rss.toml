@@ -20,9 +20,11 @@ url = "https://stratechery.com/feed"
 # --- Reader routing ------------------------------------------------------------
 #
 #   location - where this subscription's saves land in Reader:
-#              new | later | archive | feed. Unset = feed (pulpwise acts as
-#              a feed reader in front of Reader; route a subscription to
-#              "new" to put its picks in your triage flow instead).
+#              new | later | archive | feed. "inbox" is accepted as an
+#              alias for "new" (Reader's UI name for it). Unset = feed
+#              (pulpwise acts as a feed reader in front of Reader; route a
+#              subscription to "new" to put its picks in your triage flow
+#              instead).
 #              Reader silently falls back to your account default if you
 #              target a location you've disabled in your Reader settings.
 #   tags     - comma-separated Reader tags applied to every document this

@@ -128,6 +128,23 @@ def test_add_once_defaults_location_to_none_meaning_feed(
     assert pipeline.DEFAULT_LOCATION == "feed"
 
 
+def test_add_maps_inbox_alias_to_new(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_sink(monkeypatch)
+    captured: dict[str, object] = {}
+
+    def fake_add_once(url: str, *args: object, **kwargs: object) -> pipeline.AddResult:
+        captured["location"] = kwargs.get("location")
+        return pipeline.AddResult(reader_url=_READER_URL, deduped=False)
+
+    monkeypatch.setattr(pipeline, "add_once", fake_add_once)
+
+    result = runner.invoke(
+        app, ["add", "https://example.com/article", "--once", "--location", "inbox"]
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["location"] == "new"
+
+
 def test_add_rejects_invalid_location(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_sink(monkeypatch)
 
