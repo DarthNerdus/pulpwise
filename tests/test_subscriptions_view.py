@@ -1,6 +1,6 @@
 """Tests for the Subscriptions view's pure helpers.
 
-The widget itself is exercised in `pulp tui`; only the
+The widget itself is exercised in `pulpwise tui`; only the
 notification-message logic gets a unit test because the wording matters
 - 'nothing to fetch' vs '+0 from sub, 78 dedup'd' is the difference
 between 'you understand what happened' and 'you think it's broken'.
@@ -8,8 +8,8 @@ between 'you understand what happened' and 'you think it's broken'.
 
 from __future__ import annotations
 
-from pulpline.pipeline import BackfillReport
-from pulpline.tui.views.subscriptions import _backfill_outcome_message
+from pulpwise.pipeline import BackfillReport
+from pulpwise.tui.views.subscriptions import _backfill_outcome_message
 
 
 def _report(
@@ -40,12 +40,16 @@ def test_message_when_archive_fully_drained_and_nothing_new() -> None:
 
 
 def test_message_when_max_new_hit_signals_more_available() -> None:
-    """Hitting the limit means there's more to fetch; the message must say so."""
+    """Hitting the limit means there's more to fetch; the message must say so,
+    in TUI terms - the modal takes a bare count, so pointing the user at the
+    CLI-only `--posts` flag would be a dead end."""
     msg, sev = _backfill_outcome_message(
         "etymology", _report(new=50, skipped=25, stopped="max_new")
     )
     assert "+50 from etymology" in msg
     assert "archive has more" in msg
+    assert "higher count" in msg
+    assert "--posts" not in msg
     assert sev == "information"
 
 
@@ -61,9 +65,11 @@ def test_message_when_exhausted_with_new_items_says_fully_ingested() -> None:
 
 
 def test_message_when_since_date_hit() -> None:
+    """No CLI flag names in TUI notifications - `--since` doesn't exist here."""
     msg, _ = _backfill_outcome_message("etymology", _report(new=5, skipped=2, stopped="since"))
     assert "+5 from etymology" in msg
-    assert "--since" in msg
+    assert "date cutoff" in msg
+    assert "--since" not in msg
 
 
 def test_message_severity_is_warning_when_errors_present() -> None:

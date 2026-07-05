@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from pulpline.util.dedup import dedup_key, normalize_url
+from pulpwise.util.dedup import dedup_key, normalize_url
 
 
 @pytest.mark.parametrize(

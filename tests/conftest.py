@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+import logging
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import httpx
 import pytest
 
-from pulpline.util.http import reset_rate_limit_state
+from pulpwise.sinks.readwise import ReadwiseSink
+from pulpwise.util.http import reset_rate_limit_state
+from pulpwise.util.logging import LOGGER_NAME
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -37,6 +41,79 @@ def fake_timer() -> FakeTimer:
     return FakeTimer()
 
 
+class FakeReadwise:
+    """In-memory Readwise Reader API served over httpx.MockTransport.
+
+    Default behavior mirrors the real API's happy path: POST /api/v3/save/
+    answers 201 for a URL it has never seen and 200 (same document id) for a
+    repeat, GET /api/v2/auth/ answers `auth_status` (204). Every save payload
+    is recorded in `save_payloads` so tests can assert exactly what went over
+    the wire. There is deliberately no DELETE handler - Pulp Wise is
+    push-only, so any DELETE hitting this fake is a bug (404s loudly).
+
+    Queue `httpx.Response`s on `save_responses` to script deviations (429s,
+    401s, garbage bodies); they are popped in order, after the payload is
+    recorded.
+    """
+
+    def __init__(self) -> None:
+        self.save_payloads: list[dict[str, object]] = []
+        self.save_auth_headers: list[str] = []
+        self.save_responses: list[httpx.Response] = []
+        self.auth_status = 204
+        self.documents: dict[str, str] = {}  # submitted url -> document id
+        self._counter = 0
+
+    def reader_url(self, document_id: str) -> str:
+        return f"https://read.readwise.io/read/{document_id}"
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path == "/api/v3/save/":
+            self.save_auth_headers.append(request.headers.get("Authorization", ""))
+            payload = json.loads(request.content.decode("utf-8"))
+            self.save_payloads.append(payload)
+            if self.save_responses:
+                return self.save_responses.pop(0)
+            url = str(payload["url"])
+            already = url in self.documents
+            if not already:
+                self._counter += 1
+                self.documents[url] = f"doc-{self._counter}"
+            doc_id = self.documents[url]
+            return httpx.Response(
+                200 if already else 201,
+                json={"id": doc_id, "url": self.reader_url(doc_id)},
+            )
+        if request.method == "GET" and path == "/api/v2/auth/":
+            return httpx.Response(self.auth_status)
+        return httpx.Response(404, text=f"unmocked Readwise endpoint: {request.url}")
+
+    def client(self) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(self.handler))
+
+    def sink(self, timer: FakeTimer, token: str = "test-token", **kwargs: object) -> ReadwiseSink:
+        """A real ReadwiseSink wired to this fake API with injected time."""
+        return ReadwiseSink(
+            token,
+            client=self.client(),
+            sleep=timer.sleep,
+            clock=timer.clock,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+
+@pytest.fixture
+def fake_readwise() -> FakeReadwise:
+    return FakeReadwise()
+
+
+@pytest.fixture
+def readwise_sink(fake_readwise: FakeReadwise, fake_timer: FakeTimer) -> ReadwiseSink:
+    """A ready-to-use sink over `fake_readwise` that never really sleeps."""
+    return fake_readwise.sink(fake_timer)
+
+
 @pytest.fixture(autouse=True)
 def _fresh_rate_limit_state() -> None:
     """The retry transport keeps process-wide per-host cooldowns; forget them
@@ -45,35 +122,42 @@ def _fresh_rate_limit_state() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolated_pulpline_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Per-test isolation for pulpline's persistent state.
+def _reset_pulpwise_logging() -> Iterator[None]:
+    """Undo `setup_logging`'s process-global logger mutations after each test.
 
-    Isolates: the state DB (via PULPLINE_STATE_PATH), the user's config file
-    (via PULPLINE_CONFIG_PATH), and the one-shot default output dir (via
-    PULPLINE_OUTPUT_DIR).
-
-    Does NOT isolate sync output. `pulp sync` writes to `paths.output_dir`
-    from the loaded TOML config, which is independent of the env var.
-    Tests that exercise sync must pass an explicit `output_dir` on the
-    Subscription or set `Config.paths.output_dir` themselves; otherwise EPUBs
-    will land in the user's actual `~/Sync/Pulpline/`.
+    setup_logging sets `propagate = False` on the `pulpwise` logger and
+    attaches file handlers. Left in place, any test that runs the CLI (which
+    calls setup_logging) silently breaks every later `caplog` assertion in
+    the session - caplog captures at the root logger, which propagation no
+    longer reaches.
     """
-    monkeypatch.setenv("PULPLINE_STATE_PATH", str(tmp_path / "state.db"))
-    monkeypatch.setenv("PULPLINE_CONFIG_PATH", str(tmp_path / "config.toml"))
-    monkeypatch.setenv("PULPLINE_OUTPUT_DIR", str(tmp_path / "out"))
+    yield
+    logger = logging.getLogger(LOGGER_NAME)
+    for handler in list(logger.handlers):
+        if getattr(handler, "_pulpwise_owned", False):
+            logger.removeHandler(handler)
+            handler.close()
+    logger.propagate = True
+    logger.setLevel(logging.NOTSET)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_pulpwise_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Per-test isolation for pulpwise's persistent state.
+
+    Isolates the state DB (via PULPWISE_STATE_PATH), the user's config file
+    (via PULPWISE_CONFIG_PATH), and the log dir. Also strips
+    PULPWISE_READWISE_TOKEN so a token in the developer's environment can't
+    leak into token-resolution tests (or let a test accidentally resolve a
+    real credential).
+    """
+    monkeypatch.setenv("PULPWISE_STATE_PATH", str(tmp_path / "state.db"))
+    monkeypatch.setenv("PULPWISE_CONFIG_PATH", str(tmp_path / "config.toml"))
     # CliRunner-driven tests go through _main, which calls setup_logging at
     # the default XDG path. Point that at tmp_path too so test runs don't
-    # leak entries into the developer's real ~/.local/state/pulpline/log/.
-    monkeypatch.setenv("PULPLINE_LOG_DIR", str(tmp_path / "logs"))
-    # SLUM cache lives at ~/.cache/pulpline/slum.json by default; route
-    # tests at tmp_path so cache writes during a search test don't shadow
-    # the user's real cache (and don't bleed across test runs).
-    monkeypatch.setenv("PULPLINE_CACHE_DIR", str(tmp_path / "cache"))
-
-
-@pytest.fixture
-def sample_html() -> str:
-    return (FIXTURES / "sample_article.html").read_text(encoding="utf-8")
+    # leak entries into the developer's real ~/.local/state/pulpwise/log/.
+    monkeypatch.setenv("PULPWISE_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.delenv("PULPWISE_READWISE_TOKEN", raising=False)
 
 
 @pytest.fixture

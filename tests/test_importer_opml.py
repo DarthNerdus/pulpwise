@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from pulpline.importers.opml import OpmlError, parse_opml
+from pulpwise.importers.opml import OpmlError, parse_opml
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

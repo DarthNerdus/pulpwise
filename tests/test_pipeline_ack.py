@@ -3,20 +3,27 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from pathlib import Path
 from typing import ClassVar
 
-from pulpline import pipeline
-from pulpline.config import Config, Subscription
-from pulpline.models import FetchError, ItemRef, RawArticle
-from pulpline.sources.base import Source
-from pulpline.state import connect
+import pytest
+
+from pulpwise import pipeline
+from pulpwise.config import Config, Subscription
+from pulpwise.models import FetchError, ItemRef, RawArticle, ReaderSubmission
+from pulpwise.sinks.readwise import ReadwiseSink
+from pulpwise.sources.base import Source
+from pulpwise.state import connect
+
+MAILBOX = "https://mail.example/box"
+
+SUB = Subscription(name="fake", source="fake-acking", url=MAILBOX)
 
 
 class AckingSource(Source):
-    """Fake source that records event ordering across fetch/render/ack."""
+    """Fake fetching source that records event ordering across fetch/ack."""
 
     name: ClassVar[str] = "fake-acking"
+    fetch_needed: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -44,11 +51,9 @@ class AckingSource(Source):
             title=ref.url.rsplit("/", 1)[-1],
             body_html="<p>x</p>",
             canonical_url=ref.url,
-            source_url=target_url_placeholder,
+            source_url=MAILBOX,
+            content_gated=True,
         )
-
-    def render(self, article: RawArticle) -> bytes:
-        return b"bytes"
 
     def ack(self, ref: ItemRef) -> None:
         if self.ack_raises:
@@ -56,106 +61,122 @@ class AckingSource(Source):
         self.events.append(("ack", ref.url))
 
 
-target_url_placeholder = "fake://mailbox"
-
-
-def _sub(out: Path) -> Subscription:
-    return Subscription(
-        name="fake", source="fake-acking", url=target_url_placeholder, output_dir=str(out)
-    )
-
-
-def _run(source: AckingSource, out: Path) -> pipeline.SyncReport:
-    cfg = Config(subscriptions=(_sub(out),))
+def _run(source: Source, sink: ReadwiseSink) -> pipeline.SyncReport:
+    cfg = Config(subscriptions=(SUB,))
     with connect() as conn:
-        return pipeline._sync_with_source(_sub(out), cfg, conn, source, progress=None)
+        return pipeline._sync_with_source(SUB, cfg, conn, source, sink, None)
 
 
-def test_ack_runs_after_record_per_item(tmp_path: Path) -> None:
-    source = AckingSource(["fake://a", "fake://b"])
-    report = _run(source, tmp_path / "out")
+def test_ack_runs_after_record_per_item(readwise_sink: ReadwiseSink) -> None:
+    source = AckingSource(["https://mail.example/a", "https://mail.example/b"])
+    report = _run(source, readwise_sink)
 
     assert report.new_items == 2
     assert source.events == [
-        ("fetch", "fake://a"),
-        ("ack", "fake://a"),
-        ("fetch", "fake://b"),
-        ("ack", "fake://b"),
+        ("fetch", "https://mail.example/a"),
+        ("ack", "https://mail.example/a"),
+        ("fetch", "https://mail.example/b"),
+        ("ack", "https://mail.example/b"),
     ]
 
 
-def test_ack_runs_on_ledger_skips(tmp_path: Path) -> None:
-    out = tmp_path / "out"
-    _run(AckingSource(["fake://a"]), out)
+def test_push_precedes_record_precedes_ack(
+    readwise_sink: ReadwiseSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The crash-safety contract: remote push, then ledger write, then ack."""
+    source = AckingSource(["https://mail.example/a"])
+    events = source.events  # share one list so ordering is globally visible
 
-    second = AckingSource(["fake://a"])
-    report = _run(second, out)
+    original_push = readwise_sink.push
+
+    def spy_push(submission: ReaderSubmission, **kwargs: object) -> object:
+        events.append(("push", submission.url))
+        return original_push(submission, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(readwise_sink, "push", spy_push)
+
+    from pulpwise.state import record_item as original_record
+
+    def spy_record(conn: object, item: object) -> None:
+        events.append(("record", item.canonical_url))  # type: ignore[attr-defined]
+        original_record(conn, item)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(pipeline, "record_item", spy_record)
+
+    report = _run(source, readwise_sink)
+
+    assert report.new_items == 1
+    assert events == [
+        ("fetch", "https://mail.example/a"),
+        ("push", "https://mail.example/a"),
+        ("record", "https://mail.example/a"),
+        ("ack", "https://mail.example/a"),
+    ]
+
+
+def test_ack_runs_on_ledger_skips(readwise_sink: ReadwiseSink) -> None:
+    _run(AckingSource(["https://mail.example/a"]), readwise_sink)
+
+    second = AckingSource(["https://mail.example/a"])
+    report = _run(second, readwise_sink)
 
     assert report.skipped == 1
-    assert second.events == [("ack", "fake://a")]  # no fetch, still acked
+    assert second.events == [("ack", "https://mail.example/a")]  # no fetch, still acked
 
 
-def test_ack_not_called_for_failed_items(tmp_path: Path) -> None:
-    source = AckingSource(["fake://a", "fake://b"], fail_urls={"fake://b"})
-    report = _run(source, tmp_path / "out")
+def test_ack_not_called_for_failed_items(readwise_sink: ReadwiseSink) -> None:
+    source = AckingSource(
+        ["https://mail.example/a", "https://mail.example/b"],
+        fail_urls={"https://mail.example/b"},
+    )
+    report = _run(source, readwise_sink)
 
     assert report.new_items == 1
     assert report.errors == 1
-    assert ("ack", "fake://b") not in source.events
+    assert ("ack", "https://mail.example/b") not in source.events
 
 
-def test_ack_failure_does_not_fail_the_item(tmp_path: Path) -> None:
-    source = AckingSource(["fake://a"], ack_raises=True)
-    report = _run(source, tmp_path / "out")
+def test_ack_failure_does_not_fail_the_item(readwise_sink: ReadwiseSink) -> None:
+    source = AckingSource(["https://mail.example/a"], ack_raises=True)
+    report = _run(source, readwise_sink)
 
     assert report.new_items == 1
     assert report.errors == 0
 
 
-def test_backfill_acks_on_record_and_skip(tmp_path: Path) -> None:
-    out = tmp_path / "out"
-    cfg = Config(subscriptions=(_sub(out),))
-
-    first = AckingSource(["fake://a", "fake://b"])
+def test_backfill_acks_on_record_and_skip(readwise_sink: ReadwiseSink) -> None:
+    first = AckingSource(["https://mail.example/a", "https://mail.example/b"])
     with connect() as conn:
         report = pipeline._backfill_with_source(
-            _sub(out), cfg, conn, first, max_new=None, since_iso=None
+            SUB, conn, first, readwise_sink, max_new=None, since_iso=None
         )
     assert report.new_items == 2
-    assert ("ack", "fake://a") in first.events
-    assert ("ack", "fake://b") in first.events
+    assert ("ack", "https://mail.example/a") in first.events
+    assert ("ack", "https://mail.example/b") in first.events
 
     # Second walk: both items are ledger-skips but still acked (heal path).
-    second = AckingSource(["fake://a", "fake://b"])
+    second = AckingSource(["https://mail.example/a", "https://mail.example/b"])
     with connect() as conn:
         report2 = pipeline._backfill_with_source(
-            _sub(out), cfg, conn, second, max_new=None, since_iso=None
+            SUB, conn, second, readwise_sink, max_new=None, since_iso=None
         )
     assert report2.skipped_already_ingested == 2
-    assert second.events == [("ack", "fake://a"), ("ack", "fake://b")]
+    assert second.events == [
+        ("ack", "https://mail.example/a"),
+        ("ack", "https://mail.example/b"),
+    ]
 
 
-def test_sources_without_ack_are_untouched(tmp_path: Path) -> None:
+def test_sources_without_ack_are_untouched(readwise_sink: ReadwiseSink) -> None:
     class PlainSource(Source):
         name: ClassVar[str] = "fake-plain"
+        fetch_needed: ClassVar[bool] = False
 
         def discover(self, target_url: str) -> Iterable[ItemRef]:
-            return [ItemRef(url="fake://a", title="a")]
+            return [ItemRef(url="https://mail.example/a", title="a")]
 
         def fetch(self, ref: ItemRef) -> RawArticle:
-            return RawArticle(
-                title="a",
-                body_html="<p>x</p>",
-                canonical_url=ref.url,
-                source_url=target_url_placeholder,
-            )
+            raise NotImplementedError
 
-        def render(self, article: RawArticle) -> bytes:
-            return b"bytes"
-
-    cfg = Config(subscriptions=(_sub(tmp_path / "out"),))
-    with connect() as conn:
-        report = pipeline._sync_with_source(
-            _sub(tmp_path / "out"), cfg, conn, PlainSource(client=None), progress=None
-        )
+    report = _run(PlainSource(client=None), readwise_sink)
     assert report.new_items == 1

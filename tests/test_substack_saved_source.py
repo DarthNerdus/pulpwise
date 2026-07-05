@@ -13,9 +13,9 @@ from typing import Any
 import httpx
 import pytest
 
-from pulpline.auth import CookieEntry
-from pulpline.models import ExtractionError, FetchError, ItemRef
-from pulpline.sources.substack import SubstackSavedSource
+from pulpwise.auth import CookieEntry
+from pulpwise.models import ExtractionError, FetchError, ItemRef
+from pulpwise.sources.substack import SubstackSavedSource
 
 SAVES_API = "https://substack.com/api/v1/reader/posts"
 SAVES_URL = "https://substack.com/inbox/saved"
@@ -153,13 +153,13 @@ def test_fetch_resolves_home_post_url_via_by_id_endpoint() -> None:
         article = source.fetch(ItemRef(url=home_url))
 
     assert article.body_html == "<p>real body</p>"
-    # Saves embed author in title; we already exercise that elsewhere but
-    # verify it stacks with home/post resolution.
-    assert article.title == "Why Veganism is False - Lewis Lackey"
+    assert article.title == "Why Veganism is False"
+    assert article.author == "Lewis Lackey"
 
 
-def test_fetch_embeds_author_in_title_for_saved_one_shots() -> None:
-    """Saves land in one folder mixed across publications; filename needs author."""
+def test_fetch_keeps_plain_title_with_author_as_metadata() -> None:
+    """No more " - <author>" title suffix (that was EPUB filename
+    disambiguation); author is a first-class Readwise field instead."""
     base = "https://samkriss.substack.com"
     routes = {
         f"{base}/api/v1/posts/post-one": {
@@ -179,7 +179,7 @@ def test_fetch_embeds_author_in_title_for_saved_one_shots() -> None:
     ) as source:
         article = source.fetch(ItemRef(url=f"{base}/p/post-one"))
 
-    assert article.title == "Some Saved Post - Sam Kriss"
+    assert article.title == "Some Saved Post"
     assert article.author == "Sam Kriss"
 
 

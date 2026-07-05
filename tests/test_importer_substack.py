@@ -9,8 +9,8 @@ from typing import Any
 import httpx
 import pytest
 
-from pulpline.config import Config, Subscription, load_config
-from pulpline.importers.substack import (
+from pulpwise.config import Config, Subscription, load_config
+from pulpwise.importers.substack import (
     SubstackPublication,
     auto_reconcile,
     list_user_subscriptions,
@@ -184,7 +184,7 @@ def test_auto_reconcile_adds_new_publications_and_persists(tmp_path: Path) -> No
     sub_names = {s.name for s in new_cfg.subscriptions}
     assert {"numb-at-the-lodge", "stratechery", "astral-codex-ten"} <= sub_names
 
-    # And the change was persisted (conftest points PULPLINE_CONFIG_PATH at tmp).
+    # And the change was persisted (conftest points PULPWISE_CONFIG_PATH at tmp).
     persisted = load_config()
     assert {s.name for s in persisted.subscriptions} >= {"numb-at-the-lodge"}
 
@@ -213,7 +213,7 @@ def test_auto_reconcile_handles_subscription_name_collision(tmp_path: Path) -> N
     cfg = Config(
         auth=_auth(tmp_path),
         subscriptions=(
-            # Same name pulpline would assign to the Stratechery pub but a different URL.
+            # Same name pulpwise would assign to the Stratechery pub but a different URL.
             Subscription(
                 name="stratechery",
                 source="rss",

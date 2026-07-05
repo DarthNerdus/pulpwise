@@ -3,15 +3,15 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pulpline"
+name = "pulpwise"
 version = "0.1.0"
-description = "Local-first content pipeline for e-readers."
+description = "Content pipeline that pushes articles into Readwise Reader."
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{ name = "Egor Konovalov" }]
-keywords = ["e-reader", "epub", "rss", "local-first", "boox", "kindle", "kobo", "substack"]
+authors = [{ name = "Egor Konovalov" }, { name = "Jesse Read" }]
+keywords = ["readwise", "reader", "rss", "read-later", "substack", "newsletters"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
@@ -28,21 +28,20 @@ dependencies = [
     "typer>=0.12",
     "httpx>=0.27",
     "feedparser>=6.0.11",
-    "trafilatura>=1.12",
-    "ebooklib>=0.18",
+    "lxml>=5.0",
     "tomli-w>=1.0",
     "textual>=0.86",
     "imap-tools>=1.13.0",
 ]
 
 [project.scripts]
-pulpline = "pulpline.cli:main"
-pulp = "pulpline.cli:main"
+pulpwise = "pulpwise.cli:main"
+pw = "pulpwise.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/wtfnukee/pulpline"
-Repository = "https://github.com/wtfnukee/pulpline"
-Issues = "https://github.com/wtfnukee/pulpline/issues"
+Homepage = "https://github.com/DarthNerdus/pulpwise"
+Repository = "https://github.com/DarthNerdus/pulpwise"
+Issues = "https://github.com/DarthNerdus/pulpwise/issues"
 
 [dependency-groups]
 dev = [
@@ -53,7 +52,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/pulpline"]
+packages = ["src/pulpwise"]
 
 [[tool.uv.index]]
 name = "pypi"
@@ -68,7 +67,7 @@ warn_unreachable = true
 warn_redundant_casts = true
 
 [[tool.mypy.overrides]]
-module = ["feedparser", "trafilatura", "ebooklib.*", "lxml", "lxml.*"]
+module = ["feedparser", "lxml", "lxml.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -77,13 +76,13 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
-    "--cov=pulpline",
+    "--cov=pulpwise",
     "--cov-report=term-missing",
     "--cov-fail-under=70",
 ]
 
 [tool.coverage.run]
-source = ["src/pulpline"]
+source = ["src/pulpwise"]
 branch = true
 
 [tool.coverage.report]

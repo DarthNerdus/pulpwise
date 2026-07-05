@@ -8,10 +8,10 @@ from typing import Any
 import httpx
 import pytest
 
-from pulpline.auth import CookieEntry
-from pulpline.config import Config
-from pulpline.models import ExtractionError, FetchError, ItemRef
-from pulpline.sources.substack import SubstackSource
+from pulpwise.auth import CookieEntry
+from pulpwise.config import Config
+from pulpwise.models import ExtractionError, FetchError, ItemRef
+from pulpwise.sources.substack import SubstackSource
 
 
 def _archive_payload() -> list[dict[str, Any]]:
@@ -92,13 +92,51 @@ def test_fetch_returns_rawarticle_for_public_post() -> None:
     assert article.pub_date.year == 2026
 
 
+def test_free_post_routes_to_bare_url_submission() -> None:
+    """audience=everyone -> ungated article -> bare URL save of the canonical
+    URL (Readwise re-extracts server-side)."""
+    base = "https://samkriss.substack.com"
+    client = _routed_client({f"{base}/api/v1/posts/post-one": _post_payload()})
+
+    with SubstackSource(client=client) as source:
+        article = source.fetch(ItemRef(url=f"{base}/p/post-one"))
+        submission = source.submission_for_article(article)
+
+    assert article.content_gated is False
+    assert submission.kind == "url"
+    assert submission.url == f"{base}/p/post-one"
+    assert submission.html is None
+
+
+def test_entitled_paid_post_routes_to_html_submission() -> None:
+    """audience=only_paid with a non-empty body (cookies entitled us): the
+    content must ship in the submission - Readwise's server-side fetcher
+    carries no cookies and could never retrieve it from the canonical URL."""
+    base = "https://samkriss.substack.com"
+    payload = _post_payload(body="<p>paid body</p>")
+    payload["audience"] = "only_paid"
+    client = _routed_client({f"{base}/api/v1/posts/post-one": payload})
+
+    with SubstackSource(
+        client=client,
+        cookies=[CookieEntry(name="substack.sid", value="s", domain=".substack.com")],
+    ) as source:
+        article = source.fetch(ItemRef(url=f"{base}/p/post-one"))
+        submission = source.submission_for_article(article)
+
+    assert article.content_gated is True
+    assert submission.kind == "html"
+    assert submission.html == "<p>paid body</p>"
+    assert submission.url == f"{base}/p/post-one"
+
+
 def test_fetch_paywalled_without_cookies_raises_paywalled_with_host() -> None:
     """Empty body + audience=only_paid + no cookies -> Paywalled with host attached.
 
     The orchestrator buckets these separately from generic errors so the
     CLI can render a single 'fix your cookies for X' hint per host.
     """
-    from pulpline.models import Paywalled
+    from pulpwise.models import Paywalled
 
     base = "https://samkriss.substack.com"
     client = _routed_client({f"{base}/api/v1/posts/post-one": _post_payload(paywalled=True)})

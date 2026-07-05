@@ -1,13 +1,13 @@
 """Tests for the Stats view's pure helpers.
 
-Visualization (text rendering) is exercised by eyeballing in `pulp tui`.
+Visualization (text rendering) is exercised by eyeballing in `pulpwise tui`.
 The percentile-peak picker is the one piece of real logic worth pinning -
 get it wrong and a single outlier day flattens every bar in the chart.
 """
 
 from __future__ import annotations
 
-from pulpline.tui.views.stats import _percentile_peak, _scaled_bar
+from pulpwise.tui.views.stats import _percentile_peak, _scaled_bar
 
 
 def test_percentile_peak_returns_1_for_all_zeros() -> None:

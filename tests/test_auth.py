@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from pulpline.auth import AuthError, load_cookies
+from pulpwise.auth import AuthError, load_cookies
 
 
 def _write(path: Path, content: object) -> Path:

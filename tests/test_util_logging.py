@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from pulpline.util.logging import (
+from pulpwise.util.logging import (
     DEFAULT_FILENAME,
     LOGGER_NAME,
     default_log_dir,
@@ -17,7 +17,7 @@ from pulpline.util.logging import (
 
 
 @pytest.fixture(autouse=True)
-def _reset_pulpline_logger() -> None:
+def _reset_pulpwise_logger() -> None:
     """Tear down handlers between tests so each test starts clean."""
     logger = logging.getLogger(LOGGER_NAME)
     for h in list(logger.handlers):
@@ -27,13 +27,13 @@ def _reset_pulpline_logger() -> None:
 
 
 def test_default_log_dir_honors_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PULPLINE_LOG_DIR", "/tmp/pulpline-tests-logs")
-    assert default_log_dir() == Path("/tmp/pulpline-tests-logs")
+    monkeypatch.setenv("PULPWISE_LOG_DIR", "/tmp/pulpwise-tests-logs")
+    assert default_log_dir() == Path("/tmp/pulpwise-tests-logs")
 
 
 def test_default_log_dir_falls_back_to_xdg(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("PULPLINE_LOG_DIR", raising=False)
-    assert default_log_dir() == Path.home() / ".local" / "state" / "pulpline" / "log"
+    monkeypatch.delenv("PULPWISE_LOG_DIR", raising=False)
+    assert default_log_dir() == Path.home() / ".local" / "state" / "pulpwise" / "log"
 
 
 def test_setup_logging_creates_directory_and_file(tmp_path: Path) -> None:
@@ -88,6 +88,6 @@ def test_setup_logging_does_not_attach_stderr_when_quiet(tmp_path: Path) -> None
     assert not stream_handlers, "default setup should be file-only"
 
 
-def test_get_logger_returns_pulpline_child() -> None:
+def test_get_logger_returns_pulpwise_child() -> None:
     logger = get_logger("pipeline")
     assert logger.name == f"{LOGGER_NAME}.pipeline"

@@ -1,10 +1,19 @@
-# Email source: copy the blocks you need into ~/.config/pulpline/config.toml.
+# Email source: copy the blocks you need into ~/.config/pulpwise/config.toml.
 #
-# The mailbox is treated as a feed. Messages with ebook attachments
-# (epub/pdf/mobi/azw/azw3/fb2/cbz/cbr/djvu) have each attachment saved
-# verbatim; every other message must be an HTML email, which is cleaned and
-# rendered to EPUB. Idempotency is tracked in pulpline's ledger by
-# Message-ID, so IMAP read flags are never load-bearing.
+# The mailbox is treated as a feed of newsletters. Each HTML email is cleaned
+# and pushed to Readwise Reader as a content submission - title from the
+# Subject line, author from the sender. Emails without a "view in browser"
+# permalink get a deterministic synthetic URL (https://pulpwise.invalid/<hash>),
+# since Reader requires a URL on every save.
+#
+# Messages with ebook attachments (epub/pdf/mobi/...) are SKIPPED entirely -
+# book deliveries are mainline pulpline's job; Reader is for articles.
+# Text-only emails are skipped with an error (nothing to push).
+#
+# Idempotency is tracked in pulpwise's ledger by Message-ID, so IMAP read
+# flags are never load-bearing.
+#
+# (You also need [auth.readwise] - see examples/rss.toml.)
 
 # --- credentials (one account, shared by all email subscriptions) -----------
 #
@@ -12,56 +21,60 @@
 # chmod-600 file containing an app password (Gmail: enable 2FA, then create
 # one at https://myaccount.google.com/apppasswords):
 #
-#   printf '%s' 'abcd efgh ijkl mnop' > ~/.config/pulpline/email_password
-#   chmod 600 ~/.config/pulpline/email_password
+#   printf '%s' 'abcd efgh ijkl mnop' > ~/.config/pulpwise/email_password
+#   chmod 600 ~/.config/pulpwise/email_password
 #
-# The PULPLINE_EMAIL_PASSWORD environment variable, when set, wins over the
+# The PULPWISE_EMAIL_PASSWORD environment variable, when set, wins over the
 # file (useful for CI or secret managers). An inline `password = "..."` key
 # also works but is discouraged.
 
 [auth.email]
 username = "you@gmail.com"
-password_path = "~/.config/pulpline/email_password"
+password_path = "~/.config/pulpwise/email_password"
 
 # --- minimal subscription ----------------------------------------------------
 #
 # url shape: imaps://<host>[:port]/<folder>
 #   - imaps:// = TLS on 993 (certificate-verified). imap:// = STARTTLS on 143.
-#   - folder omitted = INBOX. Escape spaces: imaps://host/Books%20Inbox
+#   - folder omitted = INBOX. Escape spaces: imaps://host/Reader%20Inbox
 #   - credentials never go in the URL.
 
 [[subscriptions]]
 name = "mailbox"
 source = "email"
-url = "imaps://imap.gmail.com/Pulpline"
+url = "imaps://imap.gmail.com/Pulpwise"
 
 # --- all the knobs -----------------------------------------------------------
 
 # [[subscriptions]]
 # name = "mailbox"
 # source = "email"
-# url = "imaps://imap.gmail.com/Pulpline"
-# output_dir = "~/Sync/Pulpline/Mail"   # optional; default <output_dir>/<name>/
+# url = "imaps://imap.gmail.com/Pulpwise"
 #
 # [subscriptions.options]
 # since_days = 60          # discovery window; 0 = whole folder every sync.
-#                          # Use `pulp backfill mailbox` to ingest history
+#                          # Use `pulpwise backfill mailbox` to push history
 #                          # beyond the window (walks the folder newest-first).
 # mark_read = "seen"       # "seen" (default) | "move" | "none"
 #                          # Applied only AFTER an item is recorded, so a
 #                          # crash mid-sync never loses mail. Purely cosmetic:
-#                          # dedup lives in pulpline's ledger, not the flag.
-# move_to = "Pulpline/done"  # required when mark_read = "move"; folder must
+#                          # dedup lives in pulpwise's ledger, not the flag.
+# move_to = "Pulpwise/done"  # required when mark_read = "move"; folder must
 #                            # exist and the server must support MOVE
 #                            # (Gmail/Dovecot/Fastmail/Outlook all do)
 # unseen_only = 0          # 1 = only consider unread mail (prefilter only)
-# prefer_web = 0           # 1 = follow "view in browser" links and extract the
-#                          # web version instead of the email HTML
+# prefer_web = 0           # 1 = when a "view in browser" permalink is found,
+#                          # submit that permalink as a bare URL save (Readwise
+#                          # fetches the web version - usually better typography)
+#                          # instead of pushing the cleaned email body. Falls
+#                          # back to the email body when no permalink exists.
+# location = "new"         # where saves land in Reader: new | later | archive | feed (default: feed)
+# tags = "newsletters"     # comma-separated Reader tags for this subscription
 
 # --- two folders, one account -----------------------------------------------
 #
-# Point a second subscription at another folder for separate library
-# sections (mail filters do the routing). Both share [auth.email].
+# Point a second subscription at another folder to route/tag newsletters
+# separately (mail filters do the routing). Both share [auth.email].
 
 # [[subscriptions]]
 # name = "newsletters"

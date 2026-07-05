@@ -1,22 +1,23 @@
-"""CLI tests for `pulp import substack` - config resolution + --auto mode."""
+"""CLI tests for `pulpwise import substack` - config resolution + --auto mode."""
 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
-from pulpline import cli
-from pulpline.cli import app
-from pulpline.config import (
+from pulpwise import cli
+from pulpwise.cli import app
+from pulpwise.config import (
     Subscription,
     add_subscription,
     load_config,
     save_config,
 )
-from pulpline.importers.substack import SubstackPublication
+from pulpwise.importers.substack import SubstackPublication
 
 runner = CliRunner()
 
@@ -133,3 +134,69 @@ def test_no_username_anywhere_exits_with_error(tmp_path: Path) -> None:
     result = runner.invoke(app, ["import", "substack"])
     assert result.exit_code == 2
     assert "username" in (result.output + (result.stderr or ""))
+
+
+def _seed_substack_auth(extra: dict[str, str | list[str]]) -> None:
+    """Write an [auth.substack] table carrying `extra` keys plus stale creds."""
+    cfg = load_config()
+    substack_auth: dict[str, str | list[str]] = {
+        "cookies_path": "/old/cookies.json",
+        "username": "olduser",
+        **extra,
+    }
+    new_auth = dict(cfg.auth)
+    new_auth["substack"] = substack_auth
+    save_config(replace(cfg, auth=new_auth))
+
+
+def test_import_merges_auth_preserving_extra_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: importing must merge into [auth.substack], not replace the
+    table wholesale - a wholesale replace silently deleted extra_cookies_paths."""
+    cookies = tmp_path / "cookies.json"
+    _write_cookies(cookies)
+    _seed_substack_auth({"extra_cookies_paths": ["/extra/a.json", "/extra/b.json"]})
+
+    _patch_list_subs(
+        monkeypatch,
+        [SubstackPublication(name="X", url="https://x.example", paid=False)],
+    )
+
+    result = runner.invoke(app, ["import", "substack", "egor", "--cookies", str(cookies), "--auto"])
+    assert result.exit_code == 0, result.output
+
+    auth = load_config().auth_for("substack")
+    assert auth["extra_cookies_paths"] == ["/extra/a.json", "/extra/b.json"]
+    assert auth["username"] == "egor"
+    assert auth["cookies_path"] == str(cookies)
+
+
+def test_import_noop_path_preserves_extra_auth_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The 'all already in config' path persists fresh creds without dropping
+    other [auth.substack] keys either."""
+    cookies = tmp_path / "cookies.json"
+    _write_cookies(cookies)
+    _seed_substack_auth({"extra_cookies_paths": ["/extra/a.json"]})
+    save_config(
+        add_subscription(
+            load_config(),
+            Subscription(name="x", source="substack", url="https://x.example"),
+        )
+    )
+
+    _patch_list_subs(
+        monkeypatch,
+        [SubstackPublication(name="X", url="https://x.example", paid=False)],
+    )
+
+    result = runner.invoke(app, ["import", "substack", "egor", "--cookies", str(cookies), "--auto"])
+    assert result.exit_code == 0, result.output
+    assert "already in config" in result.output
+
+    auth = load_config().auth_for("substack")
+    assert auth["extra_cookies_paths"] == ["/extra/a.json"]
+    assert auth["username"] == "egor"
+    assert auth["cookies_path"] == str(cookies)

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+import logging
 from datetime import UTC, date, datetime, timedelta
 from email.message import EmailMessage as StdEmailMessage
 from pathlib import Path
@@ -11,14 +12,14 @@ import httpx
 import pytest
 from imap_tools import MailMessage
 
-from pulpline.config import Config, Subscription
-from pulpline.models import ExtractionError, FetchError, ItemRef
-from pulpline.sources.email import EmailSource
-from pulpline.util.dedup import normalize_url
-from pulpline.util.imap import MessageSummary, MimePart
+from pulpwise.config import Config, Subscription
+from pulpwise.models import ExtractionError, FetchError, ItemRef, ItemSkipped
+from pulpwise.sinks.readwise import ReadwiseSink
+from pulpwise.sources.email import EmailSource
+from pulpwise.util.dedup import normalize_url
+from pulpwise.util.imap import MessageSummary, MimePart
 
-MAILBOX_URL = "imaps://imap.example.com/Pulpline"
-ClientFactory = Callable[..., httpx.Client]
+MAILBOX_URL = "imaps://imap.example.com/Pulpwise"
 
 
 # --- fixture builders ---------------------------------------------------------
@@ -165,16 +166,16 @@ def make_source(
 
 
 def test_registry_and_url_claiming() -> None:
-    from pulpline.sources import REGISTRY, pick_source_for_url
+    from pulpwise.sources import REGISTRY, pick_source_for_url
 
     assert REGISTRY["email"] is EmailSource
-    assert pick_source_for_url("imaps://imap.gmail.com/Pulpline") is EmailSource
-    assert EmailSource.is_subscribable("imaps://imap.gmail.com/Pulpline")
+    assert pick_source_for_url("imaps://imap.gmail.com/Pulpwise") is EmailSource
+    assert EmailSource.is_subscribable("imaps://imap.gmail.com/Pulpwise")
     assert not EmailSource.matches_url("https://example.com/feed")
 
 
 def test_default_subscription_name() -> None:
-    assert EmailSource.default_subscription_name("imaps://imap.gmail.com/Pulpline") == "pulpline"
+    assert EmailSource.default_subscription_name("imaps://imap.gmail.com/Pulpwise") == "pulpwise"
     assert EmailSource.default_subscription_name("imaps://imap.gmail.com") == "mailbox"
     assert EmailSource.default_subscription_name("not a url") == "mailbox"
 
@@ -182,23 +183,21 @@ def test_default_subscription_name() -> None:
 # --- discovery -------------------------------------------------------------------
 
 
-def test_discover_yields_one_ref_per_ebook_attachment() -> None:
-    summary = make_summary(
+def test_discover_skips_ebook_delivery_messages(caplog: pytest.LogCaptureFixture) -> None:
+    """Messages carrying ebook attachments are book deliveries - the mainline
+    pulpline tool's job, not this fork's. They yield nothing at discovery."""
+    delivery = make_summary(
         "10",
         parts=(html_part("1"), epub_part("2", "Book One.epub"), epub_part("3", "Book Two.epub")),
     )
-    source = make_source(FakeImapSession([summary]))
+    newsletter = make_summary("11", message_id="<n@x>", subject="Issue 42", parts=(html_part("1"),))
+    source = make_source(FakeImapSession([delivery, newsletter]))
 
-    refs = list(source.discover(MAILBOX_URL))
+    with caplog.at_level(logging.INFO, logger="pulpwise.sources.email"):
+        refs = list(source.discover(MAILBOX_URL))
 
-    assert [r.url for r in refs] == [
-        "mid:msg-10@example.com/att/2",
-        "mid:msg-10@example.com/att/3",
-    ]
-    assert refs[0].title == "Book One"
-    # last_known_total means all-time population; a since-window count would
-    # render nonsense ingested/total ratios in the TUI, so it stays unset.
-    assert source.last_known_total is None
+    assert [r.url for r in refs] == ["mid:n@x"]
+    assert "skipping ebook delivery message" in caplog.text
 
 
 def test_discover_yields_whole_message_ref_for_newsletter() -> None:
@@ -209,6 +208,9 @@ def test_discover_yields_whole_message_ref_for_newsletter() -> None:
 
     assert [r.url for r in refs] == ["mid:msg-11@example.com"]
     assert refs[0].title == "Issue 42"
+    # last_known_total means all-time population; a since-window count would
+    # render nonsense ingested/total ratios in the TUI, so it stays unset.
+    assert source.last_known_total is None
 
 
 def test_discover_degrades_to_whole_message_when_structure_unknown() -> None:
@@ -256,11 +258,12 @@ def test_missing_message_id_gets_stable_synthetic_key() -> None:
     (ref_b,) = list(source_b.discover(MAILBOX_URL))
 
     assert ref_a.url == ref_b.url  # key is uid-independent
-    assert ref_a.url.startswith("mid:pulpline-")
+    assert ref_a.url.startswith("mid:pulpwise-")
 
 
-def test_discover_backwards_pages_newest_first() -> None:
+def test_discover_backwards_pages_newest_first_and_skips_deliveries() -> None:
     summaries = [make_summary(str(uid), subject=f"s{uid}") for uid in (1, 2, 3)]
+    summaries.append(make_summary("4", parts=(epub_part("2"),)))  # ebook delivery
     source = make_source(FakeImapSession(summaries))
 
     refs = list(source.discover_backwards(MAILBOX_URL))
@@ -272,68 +275,10 @@ def test_discover_backwards_pages_newest_first() -> None:
     ]
 
 
-# --- fetch: attachments ----------------------------------------------------------
-
-
-def test_fetch_attachment_returns_raw_bytes_via_render() -> None:
-    summary = make_summary("20", parts=(html_part("1"), epub_part("2")))
-    session = FakeImapSession([summary], parts={("20", "2"): b"EPUB-BYTES"})
-    source = make_source(session)
-
-    (ref,) = list(source.discover(MAILBOX_URL))
-    article = source.fetch(ref)
-
-    assert article.title == "Some Book"
-    assert article.body_html == ""
-    assert article.publisher == "newsletter.example.com"
-    assert source.extension == "epub"
-    assert source.render(article) == b"EPUB-BYTES"
-
-
-def test_fetch_attachment_extension_is_case_insensitive() -> None:
-    summary = make_summary("21", parts=(epub_part("2", "SHOUTY.EPUB"),))
-    session = FakeImapSession([summary], parts={("21", "2"): b"X"})
-    source = make_source(session)
-
-    (ref,) = list(source.discover(MAILBOX_URL))
-    source.fetch(ref)
-
-    assert source.extension == "epub"
-
-
-def test_fetch_pdf_attachment_sets_pdf_extension() -> None:
-    part = MimePart(
-        section="2", content_type="application/pdf", filename="paper.pdf", encoding="base64"
-    )
-    summary = make_summary("22", parts=(part,))
-    session = FakeImapSession([summary], parts={("22", "2"): b"%PDF"})
-    source = make_source(session)
-
-    (ref,) = list(source.discover(MAILBOX_URL))
-    source.fetch(ref)
-
-    assert source.extension == "pdf"
-
-
-def test_structure_unknown_message_with_epub_saves_attachment() -> None:
-    summary = make_summary("23", structure_known=False)
-    session = FakeImapSession(
-        [summary], messages={"23": attachment_eml("Recovered.epub", b"RECOVERED")}
-    )
-    source = make_source(session)
-
-    (ref,) = list(source.discover(MAILBOX_URL))
-    article = source.fetch(ref)
-
-    assert article.title == "Recovered"
-    assert source.extension == "epub"
-    assert source.render(article) == b"RECOVERED"
-
-
 # --- fetch: newsletters -----------------------------------------------------------
 
 
-def test_fetch_newsletter_renders_cleaned_html() -> None:
+def test_fetch_newsletter_returns_gated_cleaned_article() -> None:
     summary = make_summary("30", subject="Issue 42", parts=(html_part("1"),))
     session = FakeImapSession([summary], messages={"30": newsletter_eml()})
     source = make_source(session)
@@ -341,30 +286,86 @@ def test_fetch_newsletter_renders_cleaned_html() -> None:
     (ref,) = list(source.discover(MAILBOX_URL))
     article = source.fetch(ref)
 
-    assert article.title == "Issue 42 - Sender Name"
+    assert article.title == "Issue 42"  # subject only, no " - Sender" suffix
     assert "Newsletter body text." in article.body_html
-    assert article.canonical_url == ref.url
+    assert article.canonical_url == ref.url  # no permalink -> mid: identity
     assert article.author == "Sender Name"
     assert article.publisher == "newsletter.example.com"
-    assert source.extension == "epub"
-
-    epub_bytes = source.render(article)
-    assert epub_bytes[:2] == b"PK"  # rendered through the real EPUB renderer
+    assert article.content_gated is True
 
 
-def test_extension_resets_to_epub_after_attachment_item() -> None:
-    att = make_summary("31", message_id="<a@x>", parts=(epub_part("2", "b.pdf"),))
-    news = make_summary("32", message_id="<b@x>", subject="Issue", parts=(html_part("1"),))
-    session = FakeImapSession(
-        [att, news], messages={"32": newsletter_eml()}, parts={("31", "2"): b"%PDF"}
-    )
+def test_newsletter_without_permalink_submits_html_under_synthetic_url() -> None:
+    summary = make_summary("31", subject="Issue 42", parts=(html_part("1"),))
+    session = FakeImapSession([summary], messages={"31": newsletter_eml()})
     source = make_source(session)
 
-    ref_att, ref_news = list(source.discover(MAILBOX_URL))
-    source.fetch(ref_att)
-    assert source.extension == "pdf"
-    source.fetch(ref_news)
-    assert source.extension == "epub"
+    (ref,) = list(source.discover(MAILBOX_URL))
+    submission = source.submission_for_article(source.fetch(ref))
+
+    assert submission.kind == "html"
+    assert submission.url.startswith("https://pulpwise.invalid/")
+    assert submission.html is not None
+    assert "Newsletter body text." in submission.html
+    assert submission.title == "Issue 42"
+    assert submission.author == "Sender Name"
+
+
+def test_newsletter_with_permalink_submits_html_under_permalink() -> None:
+    """The web permalink becomes the document identity in Readwise while the
+    content still comes from the email body."""
+    permalink = "https://news.example.com/p/issue-44"
+    html = f'<html><body><p>Body text here.</p><a href="{permalink}">View online</a></body></html>'
+    summary = make_summary("36", subject="Issue 44", parts=(html_part("1"),))
+    session = FakeImapSession([summary], messages={"36": newsletter_eml(html=html)})
+    source = make_source(session)
+
+    (ref,) = list(source.discover(MAILBOX_URL))
+    article = source.fetch(ref)
+    submission = source.submission_for_article(article)
+
+    assert article.canonical_url == permalink
+    assert article.content_gated is True
+    assert submission.kind == "html"
+    assert submission.url == permalink
+    assert submission.html is not None
+    assert "Body text here." in submission.html
+
+
+def test_prefer_web_with_permalink_becomes_bare_url_save() -> None:
+    """prefer_web means: let Readwise fetch and parse the web version itself.
+    No trafilatura fetch happens client-side (no HTTP client is even set)."""
+    permalink = "https://news.example.com/p/issue-42"
+    html = (
+        f'<html><body><p>Short body.</p><a href="{permalink}">View this post on the web</a>'
+        "</body></html>"
+    )
+    summary = make_summary("34", subject="Issue 42", parts=(html_part("1"),))
+    session = FakeImapSession([summary], messages={"34": newsletter_eml(html=html)})
+    source = make_source(session, options={"prefer_web": 1})
+
+    (ref,) = list(source.discover(MAILBOX_URL))
+    article = source.fetch(ref)
+    submission = source.submission_for_article(article)
+
+    assert article.canonical_url == permalink
+    assert article.content_gated is False
+    assert submission.kind == "url"
+    assert submission.url == permalink
+    assert submission.html is None
+
+
+def test_prefer_web_without_permalink_falls_back_to_gated_email_body() -> None:
+    summary = make_summary("35", subject="Issue 43", parts=(html_part("1"),))
+    session = FakeImapSession([summary], messages={"35": newsletter_eml()})
+    source = make_source(session, options={"prefer_web": 1})
+
+    (ref,) = list(source.discover(MAILBOX_URL))
+    article = source.fetch(ref)
+    submission = source.submission_for_article(article)
+
+    assert article.content_gated is True
+    assert submission.kind == "html"
+    assert submission.url.startswith("https://pulpwise.invalid/")
 
 
 def test_fetch_text_only_email_raises_extraction_error() -> None:
@@ -377,65 +378,44 @@ def test_fetch_text_only_email_raises_extraction_error() -> None:
         source.fetch(ref)
 
 
-def test_prefer_web_follows_permalink(mock_client_factory: ClientFactory, sample_html: str) -> None:
-    permalink = "https://news.example.com/p/issue-42"
-    html = (
-        f'<html><body><p>Short body.</p><a href="{permalink}">View this post on the web</a>'
-        "</body></html>"
-    )
-    summary = make_summary("34", subject="Issue 42", parts=(html_part("1"),))
-    session = FakeImapSession([summary], messages={"34": newsletter_eml(html=html)})
-    source = make_source(
-        session, options={"prefer_web": 1}, client=mock_client_factory({permalink: sample_html})
-    )
+def test_structure_unknown_ebook_delivery_skipped_at_fetch() -> None:
+    """When BODYSTRUCTURE was unparsable, the delivery skip can't happen at
+    discovery; fetch applies it once the whole message is downloaded."""
+    summary = make_summary("23", structure_known=False)
+    session = FakeImapSession([summary], messages={"23": attachment_eml()})
+    source = make_source(session)
 
     (ref,) = list(source.discover(MAILBOX_URL))
-    article = source.fetch(ref)
-
-    assert article.canonical_url != ref.url  # came from the web fetch
-    assert "example" in article.canonical_url
-
-
-def test_prefer_web_falls_back_to_email_body_on_fetch_failure(
-    mock_client_factory: ClientFactory,
-) -> None:
-    permalink = "https://news.example.com/p/issue-43"
-    html = f'<html><body><p>Email body wins.</p><a href="{permalink}">View online</a></body></html>'
-    summary = make_summary("35", subject="Issue 43", parts=(html_part("1"),))
-    session = FakeImapSession([summary], messages={"35": newsletter_eml(html=html)})
-    source = make_source(session, options={"prefer_web": 1}, client=mock_client_factory({}))
-
-    (ref,) = list(source.discover(MAILBOX_URL))
-    article = source.fetch(ref)
-
-    assert "Email body wins." in article.body_html
+    # ItemSkipped, not an error: the pipeline counts it as a skip and still
+    # acks, so the message isn't re-downloaded as a failure every sync.
+    with pytest.raises(ItemSkipped, match="ebook delivery"):
+        source.fetch(ref)
 
 
-def test_newsletter_canonical_url_uses_permalink_without_prefer_web() -> None:
-    permalink = "https://news.example.com/p/issue-44"
-    html = f'<html><body><p>Body text here.</p><a href="{permalink}">View online</a></body></html>'
-    summary = make_summary("36", subject="Issue 44", parts=(html_part("1"),))
-    session = FakeImapSession([summary], messages={"36": newsletter_eml(html=html)})
+def test_structure_unknown_newsletter_still_fetches() -> None:
+    summary = make_summary("24", subject="Issue 9", structure_known=False)
+    session = FakeImapSession([summary], messages={"24": newsletter_eml(subject="Issue 9")})
     source = make_source(session)
 
     (ref,) = list(source.discover(MAILBOX_URL))
     article = source.fetch(ref)
 
-    assert article.canonical_url == permalink
-    assert "Body text here." in article.body_html
+    assert article.title == "Issue 9"
+    assert "Newsletter body text." in article.body_html
 
 
-# --- fetch without discover (rebuild path) ----------------------------------------
+# --- fetch without discover (ledger-resolved refs) ---------------------------------
 
 
 def test_fetch_resolves_ledger_url_without_prior_discover() -> None:
-    summary = make_summary("40", parts=(html_part("1"), epub_part("2")))
-    session = FakeImapSession([summary], parts={("40", "2"): b"REBUILT"})
+    summary = make_summary("40", subject="Issue 40", parts=(html_part("1"),))
+    session = FakeImapSession([summary], messages={"40": newsletter_eml(subject="Issue 40")})
     source = make_source(session)
 
-    article = source.fetch(ItemRef(url="mid:msg-40@example.com/att/2"))
+    article = source.fetch(ItemRef(url="mid:msg-40@example.com"))
 
-    assert source.render(article) == b"REBUILT"
+    assert article.title == "Issue 40"
+    assert article.content_gated is True
 
 
 def test_fetch_unknown_message_raises_fetch_error() -> None:
@@ -444,18 +424,10 @@ def test_fetch_unknown_message_raises_fetch_error() -> None:
         source.fetch(ItemRef(url="mid:gone@example.com"))
 
 
-def test_fetch_http_url_rebuilds_from_web(
-    mock_client_factory: ClientFactory, sample_html: str
-) -> None:
-    """Rebuild passes the ledger's canonical_url; for newsletters that had a
-    web permalink that's an http URL, which must re-render from the web."""
-    permalink = "https://news.example.com/p/issue-9"
-    source = make_source(FakeImapSession([]), client=mock_client_factory({permalink: sample_html}))
-
-    article = source.fetch(ItemRef(url=permalink))
-
-    assert article.body_html
-    assert source.extension == "epub"
+def test_fetch_http_url_is_not_an_email_item() -> None:
+    source = make_source(FakeImapSession([]))
+    with pytest.raises(FetchError, match="not an email item URL"):
+        source.fetch(ItemRef(url="https://news.example.com/p/issue-9"))
 
 
 # --- ack / mark_read policies ------------------------------------------------------
@@ -497,52 +469,34 @@ def test_ack_none_policy_touches_nothing() -> None:
     assert session.moved == []
 
 
-def test_ack_seen_waits_for_all_attachments_of_a_message() -> None:
-    """With unseen_only, marking seen after the FIRST attachment would drop
-    the message from discovery with its siblings never ingested - so "seen"
-    must gate on all-items-acked exactly like "move"."""
-    summary = make_summary("56", parts=(epub_part("2", "a.epub"), epub_part("3", "b.epub")))
-    session = FakeImapSession([summary], parts={("56", "2"): b"A", ("56", "3"): b"B"})
-    source = make_source(session)  # default mark_read="seen"
+def test_ack_move_policy_moves_once() -> None:
+    summary = make_summary("53", parts=(html_part("1"),))
+    session = FakeImapSession([summary], messages={"53": newsletter_eml()})
+    source = make_source(session, options={"mark_read": "move", "move_to": "Pulpwise/done"})
 
-    ref_a, ref_b = list(source.discover(MAILBOX_URL))
-    source.ack(ref_a)
-    assert session.seen_uids == []  # sibling attachment still outstanding
-    source.ack(ref_b)
-    assert session.seen_uids == ["56"]
-
-
-def test_ack_move_waits_for_all_attachments_of_a_message() -> None:
-    summary = make_summary("53", parts=(epub_part("2", "a.epub"), epub_part("3", "b.epub")))
-    session = FakeImapSession([summary], parts={("53", "2"): b"A", ("53", "3"): b"B"})
-    source = make_source(session, options={"mark_read": "move", "move_to": "Pulpline/done"})
-
-    ref_a, ref_b = list(source.discover(MAILBOX_URL))
-    source.ack(ref_a)
-    assert session.moved == []  # second attachment still pending
-    source.ack(ref_b)
-    assert session.moved == [("53", "Pulpline/done")]
-    source.ack(ref_b)  # idempotent
-    assert session.moved == [("53", "Pulpline/done")]
+    (ref,) = list(source.discover(MAILBOX_URL))
+    assert session.moved == []
+    source.ack(ref)
+    assert session.moved == [("53", "Pulpwise/done")]
+    source.ack(ref)  # idempotent
+    assert session.moved == [("53", "Pulpwise/done")]
 
 
 def test_ack_move_heals_on_next_sync_via_skip_acks() -> None:
     """Crash after record-but-before-move: the next sync's skip-acks move it."""
-    summary = make_summary("54", parts=(epub_part("2", "a.epub"), epub_part("3", "b.epub")))
-    session = FakeImapSession([summary], parts={("54", "2"): b"A", ("54", "3"): b"B"})
+    summary = make_summary("54", parts=(html_part("1"),))
+    session = FakeImapSession([summary], messages={"54": newsletter_eml()})
     options: dict[str, str | int] = {"mark_read": "move", "move_to": "done"}
 
-    # Sync 1: only the first attachment gets processed (simulated crash after).
+    # Sync 1: item recorded, but the process dies before ack runs.
     source1 = make_source(session, options=options)
-    ref_a, _ = list(source1.discover(MAILBOX_URL))
-    source1.ack(ref_a)
+    list(source1.discover(MAILBOX_URL))
     assert session.moved == []
 
-    # Sync 2: first item is a ledger-skip (still acked), second processes.
+    # Sync 2: the item is a ledger-skip, but skips are acked too.
     source2 = make_source(session, options=options)
-    ref_a2, ref_b2 = list(source2.discover(MAILBOX_URL))
-    source2.ack(ref_a2)
-    source2.ack(ref_b2)
+    (ref2,) = list(source2.discover(MAILBOX_URL))
+    source2.ack(ref2)
     assert session.moved == [("54", "done")]
 
 
@@ -587,7 +541,7 @@ def test_from_config_reads_auth_and_password_file(tmp_path: Path) -> None:
 def test_env_password_wins_over_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     secret = tmp_path / "email_password"
     secret.write_text("file-secret")
-    monkeypatch.setenv("PULPLINE_EMAIL_PASSWORD", "env-secret")
+    monkeypatch.setenv("PULPWISE_EMAIL_PASSWORD", "env-secret")
     cfg = _config({"email": {"username": "user@example.com", "password_path": str(secret)}})
     captured: list[str] = []
 
@@ -637,11 +591,27 @@ def test_close_closes_session() -> None:
 # --- full pipeline integration --------------------------------------------------
 
 
-def test_pipeline_sync_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _mock_sink() -> tuple[ReadwiseSink, list[dict[str, object]]]:
+    """Real ReadwiseSink over a MockTransport that records save payloads."""
+    payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        payloads.append(body)
+        doc_id = f"doc-{len(payloads)}"
+        return httpx.Response(
+            201, json={"id": doc_id, "url": f"https://read.readwise.io/read/{doc_id}"}
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    return ReadwiseSink("test-token", client=client, sleep=lambda _s: None), payloads
+
+
+def test_pipeline_sync_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
     """The real pipeline drives EmailSource through from_config: discover ->
-    fetch -> render -> sink -> record -> ack -> close."""
-    from pulpline import pipeline
-    from pulpline.sources import email as email_module
+    fetch -> submission -> sink push -> record -> ack -> close."""
+    from pulpwise import pipeline
+    from pulpwise.sources import email as email_module
 
     summary = make_summary("60", subject="Issue 1", parts=(html_part("1"),))
     session = FakeImapSession([summary], messages={"60": newsletter_eml(subject="Issue 1")})
@@ -654,26 +624,25 @@ def test_pipeline_sync_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(email_module, "ImapSession", StubImapSession)
 
-    out = tmp_path / "out"
     cfg = Config(
         auth={"email": {"username": "u@example.com", "password": "pw"}},
-        subscriptions=(
-            Subscription(name="mailbox", source="email", url=MAILBOX_URL, output_dir=str(out)),
-        ),
+        subscriptions=(Subscription(name="mailbox", source="email", url=MAILBOX_URL),),
     )
-    total = pipeline.sync(config=cfg)
+    sink, payloads = _mock_sink()
+    total = pipeline.sync(config=cfg, sink=sink)
 
     assert total.total_new == 1
     assert total.total_errors == 0
-    files = list(out.iterdir())
-    assert len(files) == 1
-    assert files[0].name == "Issue 1 - Sender Name.epub"
-    assert files[0].read_bytes()[:2] == b"PK"
+    (payload,) = payloads
+    assert str(payload["url"]).startswith("https://pulpwise.invalid/")  # no permalink
+    assert "Newsletter body text." in str(payload["html"])
+    assert payload["title"] == "Issue 1"
+    assert payload["author"] == "Sender Name"
     assert session.seen_uids == ["60"]  # acked after record
     assert session.closed  # context manager closed the session
 
-    # Second sync: ledger-skip, no duplicate file, still zero errors.
-    second = pipeline.sync(config=cfg)
+    # Second sync: ledger-skip, nothing new pushed, still zero errors.
+    second = pipeline.sync(config=cfg, sink=sink)
     assert second.total_new == 0
     assert second.total_skipped == 1
-    assert len(list(out.iterdir())) == 1
+    assert len(payloads) == 1

@@ -6,8 +6,8 @@ import base64
 
 import pytest
 
-from pulpline.models import ExtractionError
-from pulpline.util.email_clean import clean_email_html, find_web_permalink, parse_data_uri
+from pulpwise.models import ExtractionError
+from pulpwise.util.email_clean import clean_email_html, find_web_permalink, parse_data_uri
 
 
 def test_strips_style_script_and_comments() -> None:

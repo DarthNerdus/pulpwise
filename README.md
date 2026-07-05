@@ -1,57 +1,106 @@
-# pulpline
+# Pulp Wise
 
-[![CI](https://github.com/wtfnukee/pulpline/actions/workflows/ci.yml/badge.svg)](https://github.com/wtfnukee/pulpline/actions/workflows/ci.yml)
+[![CI](https://github.com/DarthNerdus/pulpwise/actions/workflows/ci.yml/badge.svg)](https://github.com/DarthNerdus/pulpwise/actions/workflows/ci.yml)
 
-Local-first content pipeline for e-readers. Pulls articles, papers, newsletters, and manga from RSS feeds, Substack (paid + free), arXiv, MangaDex, and arbitrary URLs - converts each to a format your reader handles natively (EPUB / PDF / CBZ), and writes them to a folder you sync to your device. No cloud service. No subscription. No manual file shuffling.
+Content pipeline whose only output is [Readwise Reader](https://readwise.io/read). Pulls articles, papers, and newsletters from RSS feeds, Substack (paid + free + your saved-for-later list), arXiv, an IMAP mailbox, and arbitrary URLs - filters and dedups them locally, then pushes each one into your Reader account via the Reader API. One reading queue, curated before anything reaches it.
+
+Pulp Wise is a fork of [pulpline](https://github.com/wtfnukee/pulpline) with the file pipeline removed. Where pulpline converts content to EPUB/PDF/CBZ and writes files you sync to an e-reader, Pulp Wise ends at `POST /api/v3/save/`. No output folder, no Syncthing, no rendering. Manga (MangaDex), books (Anna's Archive), and emailed ebook attachments remain mainline pulpline's job. The two tools coexist: separate package (`pulpwise`), commands (`pulpwise` / `pw`), config (`~/.config/pulpwise/`), state (`~/.local/share/pulpwise/`), and env vars (`PULPWISE_*`).
 
 ## Status
 
-`0.1.0` (beta). The full command surface ships: `add`, `sync`, `list`, `remove`, `migrate`, `import` (substack/opml), `mangadex` (add/extend), `search anna`, and an interactive `tui`. See [SPEC.md](SPEC.md) for the design and roadmap.
+`0.1.0` (beta). The full command surface ships: `add`, `sync`, `list`, `remove`, `backfill`, `import` (substack/opml), and an interactive `tui`. See [SPEC.md](SPEC.md) for the design.
+
+## Why not just use Reader's own RSS and email addresses?
+
+Reader can subscribe to RSS feeds itself, and gives you an email address newsletters can be delivered to. If that covers you, use it directly - it's less machinery. Pulp Wise earns its place when you want:
+
+- **Category filtering on feeds** - subscribe to a mixed feed but only push entries tagged "Recommended Reading", or drop "Sponsored" and "Podcast".
+- **Cookie-authenticated Substack** - entitled paid posts pushed as full HTML, and your Substack saved-for-later list treated as a subscription.
+- **A dedup ledger you own, with delete-tombstones** - Reader's server-side dedup only lives as long as a document exists; delete a document there and a naive re-submitter recreates it on the next sync. Pulp Wise remembers what you deleted and never re-pushes it.
+- **Local subscription management** - subscriptions in one TOML file you can version, OPML import from any feed reader, and cron-driven auto-reconcile of your Substack follows.
+
+If you don't need any of those, Reader alone is the right tool.
 
 ## Install
 
 ```bash
 # Once published to PyPI:
-pipx install pulpline
+pipx install pulpwise
 ```
 
 Until then, build and install from source:
 
 ```bash
 git clone <repo>
-cd pulpline
+cd pulpwise
 make build
-uv tool install --force ./dist/pulpline-*.whl
+uv tool install --force ./dist/pulpwise-*.whl
 ```
 
 Requires Python 3.14+. macOS and Linux are first-class targets; Windows is unsupported.
+
+## Setup: the Readwise token
+
+Everything Pulp Wise does ends in a Reader API call, so the one required piece of setup is an access token. Get one at [readwise.io/access_token](https://readwise.io/access_token), then either put it in config:
+
+```toml
+# ~/.config/pulpwise/config.toml
+[auth.readwise]
+token = "XXX"
+```
+
+or - better - point at a file holding just the token:
+
+```bash
+printf '%s' 'XXX' > ~/.config/pulpwise/readwise_token
+chmod 600 ~/.config/pulpwise/readwise_token
+```
+
+```toml
+[auth.readwise]
+token_path = "~/.config/pulpwise/readwise_token"
+```
+
+The `PULPWISE_READWISE_TOKEN` environment variable wins over both - useful for keeping secrets out of files entirely.
 
 ## Quick start
 
 ```bash
 # Subscribe to a feed (auto-detected as feed)
-pulp add https://simonwillison.net/atom/everything/
+pulpwise add https://simonwillison.net/atom/everything/
 
-# Fetch a single article (auto-detected as article)
-pulp add https://stratechery.com/2026/the-end-of-the-beginning/
+# Push a single article into Reader (auto-detected as one-shot;
+# prints the Reader document URL)
+pulpwise add https://stratechery.com/2026/the-end-of-the-beginning/
 
 # Batch - any mix of feeds and articles, each classified independently
-pulp add https://a.example/feed https://b.example/article https://c.example/post
+pulpwise add https://a.example/feed https://b.example/article https://c.example/post
 
 # Paste a list of tab URLs from your clipboard
-pbpaste | xargs pulp add
+pbpaste | xargs pulpwise add
 
-# Sync new items from all subscriptions
-pulp sync
+# Push new items from all subscriptions into Reader
+pulpwise sync
 
 # List subscriptions and last-sync status
-pulp list
+pulpwise list
 
-# Remove a subscription (does not delete already-written EPUBs)
-pulp remove simon-willison-s-weblog
+# Remove a subscription (does not touch documents already in Reader)
+pulpwise remove simon-willison-s-weblog
 ```
 
-`pulp add` auto-classifies each URL: real feeds get subscribed, single articles get one-shot. Use `--once` or `--feed` to override for the whole call. Errors on one URL do not abort the rest of the batch.
+`pw` is the short alias for all of these. `pulpwise add` auto-classifies each URL: real feeds get subscribed, single articles get one-shot pushed. Use `--once` or `--feed` to override for the whole call, `--name` to name the subscription. Errors on one URL do not abort the rest of the batch, and re-adding a URL that's already in Reader is a no-op that prints the existing document URL.
+
+### How a save happens
+
+Pulp Wise submits documents to Reader in one of two modes, chosen per item:
+
+- **URL saves** for public content (RSS entries, arXiv PDFs, free Substack posts, plain web pages): the bare URL is submitted and Reader fetches + parses it server-side. Reader owns the extraction, which stays fixable on their end.
+- **HTML content submissions** for content Reader's fetcher can't reach (entitled paid Substack posts fetched with your session cookies, email newsletter bodies): Pulp Wise pushes the HTML itself, with explicit title/author/date and `should_clean_html` so Reader normalizes it. Emails without a web permalink get a deterministic synthetic URL (`https://pulpwise.invalid/<hash>`), since Reader requires a URL on every save.
+
+Reader dedupes by exact URL: the save endpoint answers 201 for a new document and 200 when it already had that URL. Reader never re-parses saved content, so content submissions are effectively write-once - fixing a broken body means delete + re-save, which loses highlights.
+
+The save endpoint is rate-limited at 50 saves/minute per token. Pulp Wise paces itself at 45/minute and honors `Retry-After` on 429; if the limiter stays angry, the current subscription stops early and the remaining items defer to the next sync (nothing is lost - unpushed items aren't in the ledger yet).
 
 ### Filtering a feed by category
 
@@ -75,248 +124,129 @@ each entry's full category list. `categories` is an allow-list: entries
 without any listed category are skipped, including untagged entries.
 `exclude_categories` is a drop-list: it only removes matches, so untagged
 entries still come through — and it wins when both options match the same
-entry. Filtering happens at discovery, so skipped entries are never fetched
+entry. Filtering happens at discovery, so skipped entries are never pushed
 and never enter the dedup ledger; if you loosen the filter later, previously
 skipped entries still in the feed are picked up on the next sync.
 
-## TUI
+This is the point of putting Pulp Wise in front of Reader's own RSS support:
+manage and filter subscriptions here, and only the keepers land in your
+Reader account.
 
-For a more interactive view of your library and ingestion stats:
+### Choosing where saves land
 
-```bash
-pulp tui
+Two more per-subscription options control Reader-side routing:
+
+```toml
+[subscriptions.options]
+location = "new"         # new | later | archive | feed (default: feed)
+tags = "tech, essays"    # comma-separated Reader tags
 ```
 
-Five tabs:
+`location` is where this subscription's saves land in Reader. **Unset, it
+defaults to `feed`** - Pulp Wise acts as a feed reader in front of Reader,
+so pushed items join the Feed section like native RSS instead of flooding
+your inbox; set `location = "new"` on the subscriptions whose picks you
+want in the triage flow. One-shot `pulpwise add <url>` takes the same
+choice via `--location` (also defaulting to `feed`). Note that Reader
+silently falls back to your account default if you target a location
+you've disabled in your Reader settings - there's no error to catch.
+`tags` applies the listed Reader tags to every document the subscription
+pushes.
 
-- **Library**: every ingested item, grouped by subscription, filterable by
-  title or URL. `/` focuses the filter, `enter` opens the highlighted file
-  in your OS default app (Preview / xdg-open / Explorer), `d` soft-deletes
-  it (file removed, ledger row kept so the next sync won't re-fetch).
-  Collapse state on the group nodes survives refreshes, so deleting an
-  item doesn't blow open every group you'd closed.
+## TUI
+
+For a more interactive view of your library and push stats:
+
+```bash
+pulpwise tui
+```
+
+Four tabs:
+
+- **Library**: every pushed item, grouped by subscription, filterable by
+  title or URL. `/` focuses the filter, `enter` opens the highlighted
+  document in Reader in your browser, `d` deletes it locally (tombstoned;
+  the Reader document is left alone - Pulp Wise never deletes from
+  Readwise), `D` toggles a view of recently deleted items. Collapse state on the group nodes survives
+  refreshes, so deleting an item doesn't blow open every group you'd
+  closed.
 - **Subscriptions**: name / source / item count / last sync / status / URL,
   with the last error surfaced for any failing feed. `d` removes the
-  highlighted subscription (config-only - already-written EPUBs stay).
-- **Search**: type a query, hit `enter`, browse Anna's Archive results
-  inline. `space` toggles a row, `a` toggles all, `d` downloads picked
-  rows (or the cursor row if none picked). Quota left and per-download
-  status surface in the line below the table. Same backend as
-  `pulp search anna` from the CLI.
+  highlighted subscription (config-only - documents already in Reader stay).
 - **Sync**: per-subscription pipeline status as one merged list. `s`
   (from any tab) kicks off a sync; rows morph from "last synced at"
   timestamps into live `12/16  Title` progress while a sub is running,
   then settle on `+3 new` / `2 paywalled` / `no change` once finished.
-  Below: Syncthing delivery status (devices online, folders, daemon
-  version). When Syncthing isn't installed, the lower section says so
-  and pulpline still shows its own state.
+  Below: Readwise token status, so an expired or missing token is visible
+  before a sync fails on it.
 - **Stats**: total / 7-day / 30-day / 1-year counts, per-source bars,
-  per-format bars (EPUB vs PDF), 30-day daily activity bars.
+  per-kind bars (`url` = URL saves, `html` = content submissions, `file` =
+  legacy pulpline items from a dropped-in database), 30-day daily
+  added/deleted activity bars.
 
-`tab` cycles tabs, `s` runs a sync, `r` refreshes data, `q` quits. Adding
-a new view is one file in `src/pulpline/tui/views/` plus an entry in
+Switch tabs with the arrow keys on the tab bar (or the mouse); `s` runs a
+sync, `r` refreshes data, `q` quits. Adding
+a new view is one file in `src/pulpwise/tui/views/` plus an entry in
 `views/__init__.VIEWS`.
-
-## Manga (MangaDex)
-
-```bash
-# Subscribe to a manga - new chapters land in `<output_dir>/<manga-slug>/` as CBZ
-pulp add https://mangadex.org/title/abc123-uuid/berserk
-
-# One-shot a single chapter
-pulp add https://mangadex.org/chapter/xyz-uuid
-```
-
-Pulpline talks to MangaDex's public API directly (no auth needed), pulls
-chapter images from MangaDex's at-home CDN, and zips them into CBZ files
-that Boox / KOReader / Calibre handle natively. Default language is English
-(`en`); the most recent 25 chapters per language are tracked per `pulp sync`.
-
-To pick a different translation language or chapter window, use the
-`pulp mangadex add` subcommand. It accepts `--language` (or `-l`) for any
-MangaDex language code (`ja`, `ru`, `es`, `fr`, `de`, `zh`, `ko`, `pt-br`,
-...) and `--max-chapters` to cap how many chapters are tracked:
-
-```bash
-pulp mangadex add 'https://mangadex.org/title/.../berserk' --language ja
-```
-
-Or edit `~/.config/pulpline/config.toml` directly. Source-specific knobs
-live under `[subscriptions.options]`:
-
-```toml
-[[subscriptions]]
-name = "berserk"
-source = "mangadex"
-url = "https://mangadex.org/title/.../berserk"
-
-[subscriptions.options]
-language = "ja"
-```
-
-One-shot chapter URLs (`/chapter/<id>`) don't need a language hint - the
-chapter ID already names a specific translated chapter.
-
-URLs on `mangadex.org` auto-route to the MangaDex source - no flag needed.
-The output is a `.cbz` (rather than `.epub` / `.pdf`) and ends up in the
-configured `output_dir` like every other source.
-
-### Read-from-start workflow
-
-For long-running manga where you want to read from chapter 1, subscribe with
-`--from-start` (sets `order=asc`) and a small `--max-chapters`:
-
-```bash
-pulp mangadex add 'https://mangadex.org/title/.../berserk' -l ru --from-start --max-chapters 10
-pulp sync                                 # downloads chapters 1-10
-
-# read those, then bump
-pulp mangadex extend berserk --by 10      # chapters 11-20 next sync
-pulp mangadex extend berserk --to 50      # set absolute target
-pulp mangadex extend berserk --all        # remove the cap entirely (paginate to end)
-```
-
-The TUI Library view shows `name (downloaded/total)` for MangaDex
-subscriptions once a sync has reported the total - so `berserk (10/358)`
-tells you at a glance how far you are.
-
-### Default vs from-start
-
-```bash
-# Default: latest 25 chapters, ongoing-feed style (same as `pulp add <url>`)
-pulp mangadex add 'https://mangadex.org/title/.../berserk' -l ru
-
-# Latest 100 chapters
-pulp mangadex add 'https://mangadex.org/title/.../berserk' -l ru --max-chapters 100
-
-# All chapters (heavy: ~20 pages × N chapters of bandwidth)
-pulp mangadex add 'https://mangadex.org/title/.../berserk' -l ru --max-chapters 0
-```
-
-**First-sync is heavy.** A 25-chapter sync downloads ~tens of MB; an
-unbounded sync of a long-running manga downloads gigabytes. Subsequent
-syncs only fetch new chapters.
 
 ## arXiv papers
 
-Pulpline ships an `arxiv` source that downloads the actual PDF instead of
-extracting the abstract page. Math papers' figures and equations live in the
-PDF; running them through trafilatura would destroy that.
+Papers are submitted to Reader as the `/pdf/<id>` URL with an explicit
+`pdf` category hint - Reader ingests PDFs by URL, and the PDF preserves
+the figures and equations that any text-extraction pipeline destroys.
 
 ```bash
-# Single paper one-shot - paste any arxiv.org URL
-pulp add https://arxiv.org/abs/2401.12345
+# Single paper one-shot - paste any arxiv.org URL (/abs/ or /pdf/)
+pulpwise add https://arxiv.org/abs/2401.12345
 
 # Subscribe to a category feed (cs.AI papers, latest 25, sorted by submission)
-pulp add 'http://export.arxiv.org/api/query?search_query=cat:cs.AI&sortBy=submittedDate&sortOrder=descending&max_results=25'
+pulpwise add 'http://export.arxiv.org/api/query?search_query=cat:cs.AI&sortBy=submittedDate&sortOrder=descending&max_results=25'
 
 # Or by author
-pulp add 'http://export.arxiv.org/api/query?search_query=au:Hinton&max_results=20'
+pulpwise add 'http://export.arxiv.org/api/query?search_query=au:Hinton&max_results=20'
 
 # Or by keyword
-pulp add 'http://export.arxiv.org/api/query?search_query=all:transformers&max_results=20'
+pulpwise add 'http://export.arxiv.org/api/query?search_query=all:transformers&max_results=20'
 ```
 
 URLs on `arxiv.org` / `export.arxiv.org` auto-route to the arXiv source - no
-flag needed. The output is a `.pdf` (not `.epub`) and lands in the same
-configured `output_dir` as everything else, where Boox readers index it
-natively.
+flag needed. `api/query` URLs subscribe; `/abs/` and `/pdf/` links one-shot.
+A one-shot does one metadata round-trip first so the ledger and Reader get a
+clean title and date instead of whatever the PDF parse guesses.
 
 For URL formats, see arXiv's [API user manual](https://info.arxiv.org/help/api/user-manual.html#query_details).
 The `search_query` field accepts category codes (`cat:cs.AI`), authors
 (`au:lastname`), keyword search (`all:phrase`, `ti:title`, `abs:abstract`),
 and Boolean combinations.
 
-## Search Anna's Archive
-
-```bash
-pulp search anna "Designing Data-Intensive Applications"
-pulp search anna "DDIA" --ext epub --lang en --limit 10
-pulp search anna "transformers" --content paper
-```
-
-Pulpline shows a numbered list of hits with title, authors, year, language,
-format, and size. Pick a number to download; the file lands in
-`<output_dir>/oneshots/` (or `[auth.annas].output_dir` if set - see below)
-and gets recorded in the items ledger so re-runs are deduped.
-
-Filters: `--content` (`book` default, `paper`, `comic`, `magazine`),
-`--ext` (`epub`, `pdf`, `mobi`, ...), `--lang` (ISO codes: `en`, `ru`,
-`ja`, ...), `--limit` (max results, default 20).
-
-### Why a donation key is required
-
-Anna's Archive funds itself through donations and offers a fast,
-CAPTCHA-free download API only to donors. Pulpline uses that API
-(`fast_download.json`) for every download - no CAPTCHA breaking, no
-mirror-roulette, no torrent fallback. **Get a key by donating at
-[annas-archive.li/donate](https://annas-archive.li/donate)**, then put it
-in your config (never in a git repo):
-
-```toml
-[auth.annas]
-api_key = "..."                              # required
-mirrors = "gl, pk, gd"                       # optional; if unset, pulpline asks SLUM
-output_dir = "~/Books"                       # optional; see below
-```
-
-Or set `PULPLINE_ANNAS_API_KEY` in the environment if you'd rather keep it
-out of files.
-
-When `[auth.annas].output_dir` is set, Anna's downloads land there instead
-of the shared `<output_dir>/oneshots/` folder - handy for keeping books
-separate from one-off article ingests. Everything else (dedup ledger, TUI
-delete) works the same regardless of where the file lives.
-
-When `[auth.annas].mirrors` is unset, pulpline queries [SLUM](https://open-slum.org/)
-(the Shadow Library Uptime Monitor) on first use to learn which mirrors
-are currently up, and caches the answer at `~/.cache/pulpline/slum.json`
-for 24h. So when a domain rotates, pulpline notices within a day rather
-than failing silently. SLUM going down falls back to the same hardcoded
-list as the example above.
-
-Search itself does not need a key - it scrapes the same HTML the web UI
-serves, with a real browser User-Agent so DDoS-Guard doesn't 403 us. Anna
-[explicitly tells programmatic clients](https://annas-archive.li/llms.txt)
-that there's no search API even for donors and points at the multi-TB
-`aa_derived_mirror_metadata` torrent for offline indexing - which is not
-laptop-scale, so we accept the HTML path with the etiquette of running one
-query per user-typed command (no parallelism, no background scraping).
-
-URLs on `annas-archive.{gl,pk,gd}/md5/<hash>` also work directly: `pulp
-add https://annas-archive.gl/md5/abc...` is a one-shot download. The
-`search` command is sugar that resolves a query to one of those URLs.
-
-You are responsible for legal compliance in your jurisdiction.
-
 ## Bulk import from a feed reader (OPML)
 
 Most feed readers (Reeder, NetNewsWire, Inoreader, Feedly, ...) export
-your subscriptions as OPML. Pulpline reads that file directly:
+your subscriptions as OPML. Pulp Wise reads that file directly:
 
 ```bash
-pulp import opml ~/Downloads/subscriptions.opml
+pulpwise import opml ~/Downloads/subscriptions.opml
 # shows a numbered list of every feed in the file
 # pick which to import: 'all', 'none', or '1,3,5-7'
 ```
 
 Existing subscription names are silently skipped, so re-importing the same
 file is safe. Folders/categories from the OPML are preserved as labels in
-the prompt but don't change pulpline's flat config.
+the prompt but don't change Pulp Wise's flat config.
 
 ## Substack with paid subscriptions
 
 Substack's public `/feed` URLs only carry free posts. To bring paid posts into
-pulpline, export your logged-in session cookies and use the bulk-import
+Reader, export your logged-in session cookies and use the bulk-import
 command:
 
 ```bash
 # 1. Export cookies from your browser. A "cookies.json" extension that exports
 #    the JSON-array format works (each entry has at least `name` and `value`).
-#    Save the file somewhere private, e.g. ~/.config/pulpline/substack-cookies.json
+#    Save the file somewhere private, e.g. ~/.config/pulpwise/substack-cookies.json
 
 # 2. Import all your subscriptions in one shot:
-pulp import substack <your-substack-handle> --cookies ~/.config/pulpline/substack-cookies.json
+pulpwise import substack <your-substack-handle> --cookies ~/.config/pulpwise/substack-cookies.json
 ```
 
 The command:
@@ -327,25 +257,32 @@ The command:
 4. Writes selected ones to `config.toml` as `source = "substack"` subscriptions
 5. Records the cookies path under `[auth.substack]` so future syncs use it
 
-After import, `pulp sync` calls Substack's authenticated post API for each
-subscription, which returns full body HTML for paid posts you have access to.
-Cookies expire after a few weeks; when they do, re-export and update the
-`auth.substack.cookies_path` (or just re-run `pulp import substack`).
+After import, `pulpwise sync` calls Substack's authenticated post API for each
+subscription. Free posts are pushed as bare URL saves (Reader fetches the
+public page itself); paid posts you're entitled to are fetched with your
+cookies and pushed as HTML content submissions, since Reader's own fetcher
+carries no cookies and would only see the paywall. Cookies expire after a
+few weeks; when they do, re-export and update
+`auth.substack.cookies_path` (or just re-run `pulpwise import substack`).
 
 Cookie files contain session credentials - treat them like passwords. They
-sit in `~/.config/pulpline/` by convention, which is `chmod 600`-able.
+sit in `~/.config/pulpwise/` by convention, which is `chmod 600`-able.
+
+Worth saying plainly: the post and profile endpoints involved are Substack's
+private, unofficial API. They can change without notice, and keeping up with
+that churn is an accepted maintenance cost of this feature.
 
 ### Auto-reconcile from cron
 
-Once `[auth.substack]` is set, `pulp import substack --auto` runs
+Once `[auth.substack]` is set, `pulpwise import substack --auto` runs
 non-interactively against the username and cookies file already in
 config: it fetches your current follow list, adds any new publications
 as subscriptions, and is a no-op for ones you already have. Pair it
-with `pulp sync` in cron / launchd to pick up newly-followed
+with `pulpwise sync` in cron / launchd to pick up newly-followed
 publications without ever opening a prompt:
 
 ```
-*/30 * * * *  pulp import substack --auto && pulp sync
+*/30 * * * *  pulpwise import substack --auto && pulpwise sync
 ```
 
 ### Custom-domain publications (ACX, etc.)
@@ -353,19 +290,19 @@ publications without ever opening a prompt:
 Some Substack publications run on their own domain (e.g.
 `astralcodexten.com`). The cookies you exported from `substack.com`
 **don't authenticate against those domains**, so paid posts come back
-empty and pulpline reports them as `paywalled` rather than fetching
-them. Export a separate cookies file from the custom domain while
-logged in there, and point pulpline at both:
+empty and Pulp Wise reports them as `paywalled` rather than pushing
+a stub. Export a separate cookies file from the custom domain while
+logged in there, and point Pulp Wise at both:
 
 ```toml
 [auth.substack]
-cookies_path = "~/.config/pulpline/substack-cookies.json"
+cookies_path = "~/.config/pulpwise/substack-cookies.json"
 extra_cookies_paths = [
-  "~/.config/pulpline/astralcodexten-cookies.json",
+  "~/.config/pulpwise/astralcodexten-cookies.json",
 ]
 ```
 
-Pulpline attaches each cookie under its source domain, so the right
+Pulp Wise attaches each cookie under its source domain, so the right
 one is sent to the right host.
 
 When sync runs into a paywall, the per-subscription summary line
@@ -376,74 +313,71 @@ broken.
 ### Saved-for-later posts
 
 Substack lets you "save for later" while scrolling - that's a per-account
-list across publications, not a feed. Pulpline picks it up as a single
+list across publications, not a feed. Pulp Wise picks it up as a single
 subscription:
 
 ```bash
-pulp add https://substack.com/inbox/saved
+pulpwise add https://substack.com/inbox/saved
 ```
 
-The next `pulp sync` (and every one after) fetches every newly-saved
-post as an EPUB. Same `[auth.substack].cookies_path` covers it - if
-`pulp import substack` already wrote that, you're done. If not, save
-your cookies first and add a `[auth.substack]` block to `config.toml`.
+The next `pulpwise sync` (and every one after) pushes every newly-saved
+post into Reader: free saves as URL saves, entitled paid saves as HTML
+content submissions, and paid saves you're not entitled to reported as
+paywalled (fix the cookies for that host). Same `[auth.substack].cookies_path`
+covers it - if `pulpwise import substack` already wrote that, you're done.
+If not, save your cookies first and add a `[auth.substack]` block to
+`config.toml`.
 
 Re-running with no new saves is a no-op (deduped via the items ledger).
-Re-saving a post you already ingested is also a no-op for the same
-reason.
+Re-saving a post you already pushed is also a no-op for the same reason.
 
-Saved-post EPUBs are named `Title - Author.epub` so the saves folder
-on the Boox is scannable at a glance (saves come from many publications,
-so the bare title isn't always enough to recognize a piece). The EPUB
-renderer also downloads and embeds inline `<img>` content, so articles
-read without internet on the device - if the post had figures, they're
-in the file.
+## Email newsletters
 
-## Email: ePub attachments + newsletters
+Point Pulp Wise at an IMAP mailbox and it treats the mailbox as a feed of
+newsletters. Each HTML email is cleaned (tracking pixels, hidden preview
+text, and layout tables stripped) and pushed to Reader as a content
+submission - title from the Subject line, author from the sender. Emails
+without a "view in browser" permalink get a deterministic synthetic URL
+(`https://pulpwise.invalid/<hash>`), since Reader requires a URL on every
+save.
 
-Point pulpline at an IMAP mailbox and it treats the mailbox as a feed.
-Every message is dispatched on its own merits:
+Two kinds of message are not pushed:
 
-- **Message has an ebook attachment** (epub/pdf/mobi/azw/cbz/...): the
-  attachment is saved verbatim, one file per attachment. The email body is
-  treated as a delivery envelope and ignored. This covers Calibre's
-  "share by email", fanfic-site delivery bots, and forwarding books to
-  yourself.
-- **Anything else**: the HTML body is cleaned (tracking pixels, hidden
-  preview text, and layout tables stripped; inline images embedded) and
-  rendered to EPUB - so newsletters read like articles on the device.
-  Text-only emails are skipped with an error; there's nothing to render.
+- **Messages with ebook attachments** (epub/pdf/mobi/...) are skipped
+  entirely. Book deliveries - Calibre's "share by email", fanfic delivery
+  bots - are mainline pulpline's job; Reader is for articles.
+- **Text-only emails** are skipped with an error; there's no HTML to push.
 
 The intended setup is a **dedicated mailbox** (a separate account, or a
 folder that a mail filter routes into) so everything in it is meant for
-the reader.
+Reader.
 
 ### Setup
 
 ```bash
 # 1. Create an app password for the account (Gmail: enable 2FA, then
 #    https://myaccount.google.com/apppasswords). Save it to a file:
-mkdir -p ~/.config/pulpline
-printf '%s' 'abcd efgh ijkl mnop' > ~/.config/pulpline/email_password
-chmod 600 ~/.config/pulpline/email_password
+mkdir -p ~/.config/pulpwise
+printf '%s' 'abcd efgh ijkl mnop' > ~/.config/pulpwise/email_password
+chmod 600 ~/.config/pulpwise/email_password
 
-# 2. Add the auth block to ~/.config/pulpline/config.toml:
+# 2. Add the auth block to ~/.config/pulpwise/config.toml:
 #    [auth.email]
 #    username = "you@gmail.com"
-#    password_path = "~/.config/pulpline/email_password"
+#    password_path = "~/.config/pulpwise/email_password"
 
 # 3. Subscribe. The URL is imaps://<host>/<folder> - folder omitted = INBOX.
-pulp add imaps://imap.gmail.com/Pulpline
+pulpwise add imaps://imap.gmail.com/Pulpwise
 
 # 4. Sync as usual.
-pulp sync
+pulpwise sync
 ```
 
 A ready-to-copy config block with every option lives in
 [`examples/email.toml`](examples/email.toml).
 
 The password never goes in `config.toml` - only the *path* to it (or set
-`PULPLINE_EMAIL_PASSWORD` in the environment, which wins over the file).
+`PULPWISE_EMAIL_PASSWORD` in the environment, which wins over the file).
 `imaps://` means verified TLS on port 993; `imap://host` means STARTTLS
 on 143.
 
@@ -457,84 +391,69 @@ Set under `[subscriptions.options]`:
 | `mark_read`   | `"seen"` | `"seen"` marks processed mail read, `"move"` moves it to `move_to`, `"none"` leaves the mailbox untouched. |
 | `move_to`     | -        | destination folder, required with `mark_read = "move"`. Must exist.     |
 | `unseen_only` | `0`      | `1` = only look at unread mail. A prefilter, not the dedup mechanism.   |
-| `prefer_web`  | `0`      | `1` = follow the newsletter's "view in browser" link and extract the web version (better typography, but fetches over HTTP). |
+| `prefer_web`  | `0`      | `1` = when a "view in browser" permalink is found, submit that permalink as a bare URL save (Reader fetches the web version - usually better typography) instead of pushing the cleaned email body. Falls back to the email body when no permalink exists. |
 
 ### How it stays idempotent
 
-Already-processed messages are tracked in pulpline's own ledger, keyed on
+Already-processed messages are tracked in Pulp Wise's own ledger, keyed on
 the email's `Message-ID` - **not** on the IMAP read flag. Your phone
 marking the mailbox read (or a crash halfway through a sync) never causes
-missed or duplicated books: anything not yet in the ledger is picked up
+missed or duplicated pushes: anything not yet in the ledger is picked up
 again on the next sync. `mark_read` runs only *after* an item is safely
 recorded, purely so the mailbox reflects progress when you look at it.
 
 Two consequences worth knowing:
 
-- Deleting an EPUB from the library (TUI `d`) won't resurrect it on the
+- Deleting an item from the library (TUI `d`) won't resurrect it on the
   next sync, same as every other source.
 - A message that fails repeatedly (say, a malformed newsletter) stays
   unread in the mailbox and retries each sync until it ages out of the
-  `since_days` window. `pulp backfill <name>` reaches past the window -
+  `since_days` window. `pulpwise backfill <name>` reaches past the window -
   it walks the entire folder newest-first, which is also the way to
   ingest a mailbox's whole history on day one.
 
-Newsletter EPUBs are titled `Subject - Sender`. When two issues share a
-subject line (looking at you, "Money Stuff"), the file gets the issue's
-date appended (`Money Stuff (2026-07-03).epub`) instead of overwriting
-the previous one.
+## Backfilling archives
 
-## File organization + deletion
+`pulpwise sync` only looks at the newest page of each subscription. To walk
+an archive backwards:
 
-Pulpline lays out items in subfolders under your `output_dir`:
-
-```
-~/Sync/Pulpline/
-├── samkriss/               # one folder per subscription (auto-named after sub)
-│   ├── How to live without your phone.epub
-│   └── ...
-├── arxiv-cs-ai/
-│   └── 2401.12345v1.pdf
-├── etymology/
-│   └── ...
-└── oneshots/               # `pulp add <url>` items without a subscription
-    └── What You Can't Say.epub
+```bash
+pulpwise backfill <subscription-name>
 ```
 
-The folder name comes from the subscription's `name` automatically. To put a
-specific subscription somewhere else, set `output_dir` on that subscription
-in `~/.config/pulpline/config.toml`:
+Substack publications walk their archive by offset, the Substack saves list
+walks by save time, and email walks the whole folder newest-first. RSS and
+arXiv feeds only expose their current window, so they can't backfill.
 
-```toml
-[[subscriptions]]
-name = "berserk"
-source = "mangadex"
-url = "..."
-output_dir = "~/Sync/Manga/Berserk"   # explicit override; no auto-subfolder
-```
+Already-pushed items (including deleted ones) are skipped but don't stop
+the walk, so sparse holes get filled. The walk stops after a bounded number
+of new saves per run (50 by default - deliberate, given the 50-saves/minute
+API budget); re-running resumes where it left off via the dedup ledger.
 
-### Deleting read items
+## Deleting items
 
-In the TUI Library view, `d` deletes the highlighted file. Pulpline does a
-**soft delete**:
+In the TUI Library view, `d` deletes the highlighted item:
 
-- The file is removed from disk (and Syncthing pushes the deletion to your reader)
-- The item's row in the dedup ledger is kept, with `output_path` cleared
-- The next `pulp sync` will *not* re-fetch the deleted article
+- The ledger row is kept but tombstoned (`deleted_at` set)
+- The Reader document is **not** touched - Pulp Wise is push-only and never
+  deletes from Readwise; remove the document in Reader yourself if you want
+  it gone there
+- The next `pulpwise sync` will *not* re-push the deleted article
 
-Re-running `pulp add <url>` on a soft-deleted article re-ingests it - the
-dedup row is updated in place. So `d` is "I'm done with this" and `pulp add`
-is "actually I want it back."
-
-The Library and Stats views only count currently-extant items; deleted
-articles drop out of the stats once they're gone from disk.
+The tombstone is load-bearing: Reader's dedup only knows about documents
+that exist, so without it, anything you deleted (in the TUI *or* in Reader
+itself, once the item ages back into a feed) would be quietly recreated on
+the next sync. Re-running `pulpwise add <url>` on a deleted article
+re-pushes it deliberately - the tombstone is cleared in place. So `d` is
+"I'm done with this" and `pulpwise add` is "actually I want it back."
 
 ## Configuration
 
-`~/.config/pulpline/config.toml` is created on first run. Hand-editable:
+`~/.config/pulpwise/config.toml` is created on first run. Hand-editable:
 
 ```toml
-[paths]
-output_dir = "~/Sync/Pulpline"           # where EPUBs land
+[auth.readwise]
+token_path = "~/.config/pulpwise/readwise_token"
 
 [[subscriptions]]
 name = "stratechery"
@@ -542,42 +461,43 @@ source = "rss"
 url = "https://stratechery.com/feed"
 
 [[subscriptions]]
-name = "berserk"
-source = "mangadex"                      # post-MVP, not yet shipped
-url = "..."
-output_dir = "~/Sync/Manga/Berserk"      # per-subscription override
+name = "badlogic-links"
+source = "rss"
+url = "https://badlogic-list.lakebed.app/rss"
+
+[subscriptions.options]
+categories = "Recommended Reading"
+location = "feed"
+tags = "links"
 ```
 
-State (the dedup ledger and per-subscription run state) lives in `~/.local/share/pulpline/state.db`. Removing it forces a full re-sync of every subscription.
+There is no `[paths]` section and no `output_dir` anywhere - Pulp Wise
+writes no files. Legacy pulpline keys are tolerated and ignored on load
+(so a copied-over config doesn't crash) and dropped on the next save.
 
-## Re-rendering existing items
+State (the dedup ledger and per-subscription run state) lives in
+`~/.local/share/pulpwise/state.db`. Each row records what was pushed
+(`readwise_id`, `readwise_url`, and whether it was a URL save or an HTML
+submission) plus the tombstones described above. A legacy pulpline
+`state.db` can be dropped in directly: the columns migrate in place, and
+items you already read as files are never re-pushed to Reader - any
+existing row counts as ingested.
 
-When the renderer improves (e.g., it gains image embedding, or you
-flip on a new EPUB option), older items stay in the form they were
-first written. To re-render them in place against the current code:
-
-```bash
-pulp migrate --rebuild                  # every item, every subscription
-pulp migrate --rebuild --name samkriss  # just one subscription
-```
-
-`--rebuild` re-fetches each item from its source, runs the current
-renderer over it, and overwrites the file at the same path the ledger
-records. It does *not* re-discover new items - that's `pulp sync`'s
-job. Use it when you want yesterday's saves to pick up today's
-renderer behavior.
+Deleting `state.db` does **not** give you a clean slate the way it did in
+pulpline: the next sync re-pushes whatever is still in your feeds,
+including documents you deleted in Reader, because the tombstones are gone.
 
 ## Scheduling
 
-pulpline has no built-in scheduler - point your OS at it. macOS:
+Pulp Wise has no built-in scheduler - point your OS at it. macOS:
 
 ```
-# ~/Library/LaunchAgents/com.pulpline.sync.plist (excerpt)
+# ~/Library/LaunchAgents/com.pulpwise.sync.plist (excerpt)
 <key>StartCalendarInterval</key>
 <dict><key>Minute</key><integer>0</integer></dict>
 <key>ProgramArguments</key>
 <array>
-  <string>/usr/local/bin/pulp</string>
+  <string>/usr/local/bin/pulpwise</string>
   <string>sync</string>
 </array>
 ```
@@ -585,33 +505,29 @@ pulpline has no built-in scheduler - point your OS at it. macOS:
 Linux (cron):
 
 ```
-0 * * * *  /home/you/.local/bin/pulp sync
+0 * * * *  /home/you/.local/bin/pulpwise sync
 ```
 
-systemd users can write a simple `.timer` unit pointing at `pulp sync`.
+systemd users can write a simple `.timer` unit pointing at `pulpwise sync`.
 
-Cron and launchd often capture stderr into mail or `/dev/null`; pulpline
-writes a durable log to `~/.local/state/pulpline/log/pulpline.log`
+Cron and launchd often capture stderr into mail or `/dev/null`; Pulp Wise
+writes a durable log to `~/.local/state/pulpwise/log/pulpwise.log`
 (rotated at 1 MB, 5 backups) so you can postmortem failed syncs without
 relying on the scheduler's stderr handling. Override the directory with
-`PULPLINE_LOG_DIR=/path/to/log/dir`. Use `pulp -v <cmd>` to mirror
+`PULPWISE_LOG_DIR=/path/to/log/dir`. Use `pulpwise -v <cmd>` to mirror
 DEBUG-level logs to stderr in real time.
-
-## How it gets to the reader
-
-pulpline writes EPUBs to a folder; getting them onto the device is your problem. The intended pairing is [Syncthing](https://syncthing.net/) - it syncs `~/Sync/Pulpline` to a folder on the device, and Boox / Kindle / Kobo readers index whatever shows up. Other paths work too: USB drag-and-drop, Send-to-Kindle, BooxDrop, etc.
 
 ## Development
 
 ```bash
 make sync          # uv sync runtime + dev deps
-make check         # ruff + mypy strict + 80 pytests + coverage gate
+make check         # ruff + mypy strict + pytest + coverage gate
 make test
 make typecheck
 make build         # wheel + sdist into dist/
 ```
 
-Pulpline pins PyPI as its default index. If your shell exports a non-PyPI `UV_INDEX`, the bundled `Makefile` strips it before invoking `uv`. Direnv users can `direnv allow` to get the same effect via `.envrc`.
+Pulp Wise pins PyPI as its default index. If your shell exports a non-PyPI `UV_INDEX`, the bundled `Makefile` strips it before invoking `uv`. Direnv users can `direnv allow` to get the same effect via `.envrc`.
 
 ## License
 

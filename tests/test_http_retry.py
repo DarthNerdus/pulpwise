@@ -8,8 +8,8 @@ from email.utils import format_datetime
 import httpx
 import pytest
 
-from pulpline.models import FetchError, RateLimited
-from pulpline.util.http import RetryTransport, _RateLimitState
+from pulpwise.models import FetchError, RateLimited
+from pulpwise.util.http import RetryTransport, _RateLimitState
 from tests.conftest import FakeTimer
 
 URL = "https://pub.example.com/api/v1/archive"
@@ -188,7 +188,7 @@ def test_cooldown_is_per_bucket(fake_timer: FakeTimer) -> None:
 
 
 def test_substack_source_builds_scoped_client() -> None:
-    from pulpline.sources.substack import SubstackSource
+    from pulpwise.sources.substack import SubstackSource
 
     with SubstackSource() as source:
         transport = source.client._transport

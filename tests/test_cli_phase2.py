@@ -4,32 +4,82 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
+from typing import NoReturn
 
 import httpx
 import pytest
 from typer.testing import CliRunner
 
-from pulpline import cli
-from pulpline.cli import app
-from pulpline.config import Config, Subscription, load_config
+from pulpwise import cli
+from pulpwise.cli import app
+from pulpwise.config import Config, ConfigError, Subscription, load_config
+from pulpwise.models import ExtractionError, FetchError, RateLimited
+from pulpwise.sinks.readwise import ReadwiseAuthError
+from pulpwise.state import ItemRecord, connect, record_item
+from pulpwise.util.dedup import dedup_key
 
 ClientFactory = Callable[[dict[str, str]], httpx.Client]
 runner = CliRunner()
+
+_READER_URL = "https://read.readwise.io/read/01abc"
 
 
 def _feed() -> str:
     return (Path(__file__).parent / "fixtures" / "sample_feed.xml").read_text()
 
 
+class _FakeSink:
+    """Stands in for the shared batch ReadwiseSink; records close()."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _patch_sink(monkeypatch: pytest.MonkeyPatch) -> _FakeSink:
+    """Replace cli.ReadwiseSink so one-shot dispatch never needs a real token."""
+    sink = _FakeSink()
+    monkeypatch.setattr(
+        cli, "ReadwiseSink", SimpleNamespace(from_config=lambda cfg, client=None: sink)
+    )
+    return sink
+
+
 def _patch_build_client(
     monkeypatch: pytest.MonkeyPatch, factory: ClientFactory, routes: dict[str, str]
 ) -> None:
-    """Make `pulpline.cli.build_client` return a mock-transport client."""
+    """Make `pulpwise.cli.build_client` return a mock-transport client."""
 
     def _factory() -> httpx.Client:
         return factory(routes)
 
     monkeypatch.setattr(cli, "build_client", _factory)
+
+
+def _seed_oneshot(url: str, title: str, reader_url: str = _READER_URL) -> None:
+    """Record a pushed one-shot in the (test-isolated) ledger directly.
+
+    Avoids driving pipeline.add_once for real, which would need a Readwise
+    token and a network push.
+    """
+    with connect() as conn:
+        record_item(
+            conn,
+            ItemRecord(
+                subscription_name=None,
+                source_url=url,
+                dedup_key=dedup_key(url),
+                canonical_url=url,
+                title=title,
+                pub_date=None,
+                readwise_id="01abc",
+                readwise_url=reader_url,
+                submission_kind="url",
+            ),
+        )
 
 
 def test_add_subscribes_with_derived_name(
@@ -65,7 +115,7 @@ def test_add_with_explicit_name(
 
 
 def test_is_front_page_helper() -> None:
-    from pulpline.cli import _is_front_page
+    from pulpwise.cli import _is_front_page
 
     assert _is_front_page("https://etymology.substack.com")
     assert _is_front_page("https://etymology.substack.com/")
@@ -74,7 +124,7 @@ def test_is_front_page_helper() -> None:
 
 
 def test_alternate_feed_url_helper() -> None:
-    from pulpline.cli import _alternate_feed_url
+    from pulpwise.cli import _alternate_feed_url
 
     html = """<html><head>
       <link rel="alternate" type="application/rss+xml" href="/feed">
@@ -97,7 +147,7 @@ def test_alternate_feed_url_helper() -> None:
 def test_add_autodiscovers_feed_from_front_page(
     monkeypatch: pytest.MonkeyPatch, mock_client_factory: ClientFactory
 ) -> None:
-    """`pulp add https://etymology.substack.com/` follows the alternate link to /feed."""
+    """`pulpwise add https://etymology.substack.com/` follows the alternate link to /feed."""
     front = "https://etymology.substack.com/"
     feed_url = "https://etymology.substack.com/feed"
     front_html = (
@@ -118,10 +168,9 @@ def test_add_autodiscovers_feed_from_front_page(
 def test_add_does_not_autodiscover_on_article_url(
     monkeypatch: pytest.MonkeyPatch,
     mock_client_factory: ClientFactory,
-    tmp_path: Path,
 ) -> None:
     """A specific article URL with an alternate link must NOT subscribe to the feed."""
-    from pulpline import pipeline
+    from pulpwise import pipeline
 
     article = "https://etymology.substack.com/p/some-post"
     feed_url = "https://etymology.substack.com/feed"
@@ -133,14 +182,13 @@ def test_add_does_not_autodiscover_on_article_url(
     _patch_build_client(
         monkeypatch, mock_client_factory, {article: article_html, feed_url: _feed()}
     )
+    _patch_sink(monkeypatch)
 
     captured: list[str] = []
 
-    def fake_add_once(target: str, *args: object, **kwargs: object) -> Path:
+    def fake_add_once(target: str, *args: object, **kwargs: object) -> pipeline.AddResult:
         captured.append(target)
-        out = tmp_path / "x.epub"
-        out.write_bytes(b"x")
-        return out
+        return pipeline.AddResult(reader_url=_READER_URL, deduped=False)
 
     monkeypatch.setattr(pipeline, "add_once", fake_add_once)
 
@@ -153,29 +201,28 @@ def test_add_does_not_autodiscover_on_article_url(
 def test_add_dispatches_to_oneshot_when_not_a_feed(
     monkeypatch: pytest.MonkeyPatch,
     mock_client_factory: ClientFactory,
-    tmp_path: Path,
 ) -> None:
     """Auto-detection: article URLs go to one-shot, not subscribe."""
-    from pulpline import pipeline
+    from pulpwise import pipeline
 
     url = "https://example.com/article"
     _patch_build_client(
         monkeypatch, mock_client_factory, {url: "<html><body>Not a feed</body></html>"}
     )
+    _patch_sink(monkeypatch)
 
     captured: dict[str, object] = {}
 
-    def fake_add_once(target: str, *args: object, **kwargs: object) -> Path:
+    def fake_add_once(target: str, *args: object, **kwargs: object) -> pipeline.AddResult:
         captured["url"] = target
-        out = tmp_path / "x.epub"
-        out.write_bytes(b"x")
-        return out
+        return pipeline.AddResult(reader_url=_READER_URL, deduped=False)
 
     monkeypatch.setattr(pipeline, "add_once", fake_add_once)
 
     result = runner.invoke(app, ["add", url])
     assert result.exit_code == 0, result.output
     assert captured["url"] == url
+    assert _READER_URL in result.output
     # No subscription should have been written.
     assert load_config().subscriptions == ()
 
@@ -192,24 +239,35 @@ def test_add_with_feed_flag_forces_subscribe(
     assert load_config().subscriptions[0].name == "forced"
 
 
-def test_add_with_once_flag_forces_oneshot_even_for_feeds(
-    monkeypatch: pytest.MonkeyPatch,
-    mock_client_factory: ClientFactory,
-    tmp_path: Path,
+def test_add_subscribe_persists_location_option(
+    monkeypatch: pytest.MonkeyPatch, mock_client_factory: ClientFactory
 ) -> None:
-    """`--once` overrides auto-detection - even a feed URL goes to one-shot."""
-    from pulpline import pipeline
-
+    """`--location` on a subscribe is written to options.location so every
+    future sync routes the same way (the default without it is Feed)."""
     feed_url = "https://example.com/feed"
     _patch_build_client(monkeypatch, mock_client_factory, {feed_url: _feed()})
 
+    result = runner.invoke(app, ["add", feed_url, "--feed", "--location", "new"])
+    assert result.exit_code == 0, result.output
+    assert load_config().subscriptions[0].options == {"location": "new"}
+
+
+def test_add_with_once_flag_forces_oneshot_even_for_feeds(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_client_factory: ClientFactory,
+) -> None:
+    """`--once` overrides auto-detection - even a feed URL goes to one-shot."""
+    from pulpwise import pipeline
+
+    feed_url = "https://example.com/feed"
+    _patch_build_client(monkeypatch, mock_client_factory, {feed_url: _feed()})
+    _patch_sink(monkeypatch)
+
     captured: dict[str, object] = {}
 
-    def fake_add_once(target: str, *args: object, **kwargs: object) -> Path:
+    def fake_add_once(target: str, *args: object, **kwargs: object) -> pipeline.AddResult:
         captured["url"] = target
-        out = tmp_path / "x.epub"
-        out.write_bytes(b"x")
-        return out
+        return pipeline.AddResult(reader_url=_READER_URL, deduped=False)
 
     monkeypatch.setattr(pipeline, "add_once", fake_add_once)
 
@@ -237,10 +295,9 @@ def test_add_rejects_name_with_multiple_urls() -> None:
 def test_add_processes_multiple_urls_independently(
     monkeypatch: pytest.MonkeyPatch,
     mock_client_factory: ClientFactory,
-    tmp_path: Path,
 ) -> None:
     """Mixing a feed URL and an article URL in one call: each routes correctly."""
-    from pulpline import pipeline
+    from pulpwise import pipeline
 
     feed_url = "https://a.example/feed"
     article_url = "https://b.example/article"
@@ -249,14 +306,13 @@ def test_add_processes_multiple_urls_independently(
         mock_client_factory,
         {feed_url: _feed(), article_url: "<html><body>Not a feed</body></html>"},
     )
+    _patch_sink(monkeypatch)
 
     captured: list[str] = []
 
-    def fake_add_once(target: str, *args: object, **kwargs: object) -> Path:
+    def fake_add_once(target: str, *args: object, **kwargs: object) -> pipeline.AddResult:
         captured.append(target)
-        out = tmp_path / "x.epub"
-        out.write_bytes(b"x")
-        return out
+        return pipeline.AddResult(reader_url=_READER_URL, deduped=False)
 
     monkeypatch.setattr(pipeline, "add_once", fake_add_once)
 
@@ -271,7 +327,7 @@ def test_add_processes_multiple_urls_independently(
 
 
 def test_source_name_for_url_picks_arxiv() -> None:
-    from pulpline.cli import _source_name_for_url
+    from pulpwise.cli import _source_name_for_url
 
     assert _source_name_for_url("http://export.arxiv.org/api/query?x=y") == "arxiv"
     assert _source_name_for_url("https://arxiv.org/abs/2401.12345") == "arxiv"
@@ -346,8 +402,8 @@ def test_import_substack_writes_subs_and_auth(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Full CLI flow: cookies + mocked API populate config.toml's auth + subscriptions."""
-    from pulpline import cli
-    from pulpline.importers import substack as substack_importer
+    from pulpwise import cli
+    from pulpwise.importers import substack as substack_importer
 
     cookies_path = tmp_path / "cookies.json"
     cookies_path.write_text('[{"name":"substack.sid","value":"abc"}]', encoding="utf-8")
@@ -386,8 +442,8 @@ def test_import_substack_writes_subs_and_auth(
 
 
 def test_import_substack_partial_selection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from pulpline import cli
-    from pulpline.importers import substack as substack_importer
+    from pulpwise import cli
+    from pulpwise.importers import substack as substack_importer
 
     cookies_path = tmp_path / "cookies.json"
     cookies_path.write_text('[{"name":"substack.sid","value":"abc"}]', encoding="utf-8")
@@ -419,7 +475,7 @@ def test_import_substack_missing_cookies_file_errors(tmp_path: Path) -> None:
 
 
 def test_import_substack_no_subs_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from pulpline import cli
+    from pulpwise import cli
 
     cookies_path = tmp_path / "cookies.json"
     cookies_path.write_text('[{"name":"x","value":"y"}]', encoding="utf-8")
@@ -488,36 +544,27 @@ def test_list_empty_says_so() -> None:
     assert "nothing yet" in result.output.lower()
 
 
-def test_list_shows_oneshots(
-    monkeypatch: pytest.MonkeyPatch, mock_client_factory: ClientFactory, sample_html: str
-) -> None:
-    """One-shot ingestions appear in `pulp list` under the ONE-SHOTS section."""
-    from pulpline import pipeline
-
-    url = "https://example.com/article"
-    client = mock_client_factory({url: sample_html})
-    pipeline.add_once(url, client=client)
+def test_list_shows_oneshots_with_reader_url() -> None:
+    """One-shot pushes appear in `pulpwise list` with their Reader document URL."""
+    _seed_oneshot("https://example.com/article", "The End of the Beginning")
 
     result = runner.invoke(app, ["list"])
     assert result.exit_code == 0
     assert "ONE-SHOTS" in result.output
-    assert "The End of the Beginning" in result.output  # title from sample_html
+    assert "The End of the Beginning" in result.output
+    assert _READER_URL in result.output
     assert "SUBSCRIPTIONS" not in result.output  # no subs configured
 
 
 def test_list_shows_both_sections(
-    monkeypatch: pytest.MonkeyPatch, mock_client_factory: ClientFactory, sample_html: str
+    monkeypatch: pytest.MonkeyPatch, mock_client_factory: ClientFactory
 ) -> None:
     """When both a sub and a one-shot exist, both sections render."""
-    from pulpline import pipeline
-
     feed_url = "https://example.com/feed"
-    article_url = "https://example.com/article"
     _patch_build_client(monkeypatch, mock_client_factory, {feed_url: _feed()})
     runner.invoke(app, ["add", feed_url, "--feed", "--name", "feedname"])
 
-    client = mock_client_factory({article_url: sample_html})
-    pipeline.add_once(article_url, client=client)
+    _seed_oneshot("https://example.com/article", "The End of the Beginning")
 
     result = runner.invoke(app, ["list"])
     assert result.exit_code == 0
@@ -525,6 +572,7 @@ def test_list_shows_both_sections(
     assert "feedname" in result.output
     assert "ONE-SHOTS" in result.output
     assert "The End of the Beginning" in result.output
+    assert _READER_URL in result.output
 
 
 def test_list_shows_subscription(
@@ -552,7 +600,7 @@ def test_sync_with_no_subscriptions_says_so(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_sync_invokes_pipeline_and_summarizes(monkeypatch: pytest.MonkeyPatch) -> None:
-    from pulpline import pipeline
+    from pulpwise import pipeline
 
     config = Config(subscriptions=(Subscription(name="alpha", source="rss", url="https://a/feed"),))
 
@@ -572,3 +620,142 @@ def test_sync_invokes_pipeline_and_summarizes(monkeypatch: pytest.MonkeyPatch) -
     assert "alpha" in result.output
     assert "+2 new" in result.output  # appears both per-sub and in totals
     assert "1 sub" in result.output  # totals line names the subscription count
+
+
+def test_add_batch_auth_failure_fails_oneshots_but_feed_adds_proceed(
+    monkeypatch: pytest.MonkeyPatch, mock_client_factory: ClientFactory
+) -> None:
+    """Sink creation failing (no token) marks every one-shot in the batch failed -
+    once, without a per-URL creation retry - while feed subscribes still proceed."""
+    from pulpwise import pipeline
+
+    art1 = "https://a.example/article"
+    feed_url = "https://b.example/feed"
+    art2 = "https://c.example/article"
+    _patch_build_client(
+        monkeypatch,
+        mock_client_factory,
+        {
+            art1: "<html><body>Not a feed</body></html>",
+            feed_url: _feed(),
+            art2: "<html><body>Not a feed</body></html>",
+        },
+    )
+
+    creation_attempts: list[object] = []
+
+    def failing_from_config(cfg: object, client: object = None) -> NoReturn:
+        creation_attempts.append(cfg)
+        raise ReadwiseAuthError(
+            "no Readwise access token configured; get one at https://readwise.io/access_token"
+        )
+
+    monkeypatch.setattr(cli, "ReadwiseSink", SimpleNamespace(from_config=failing_from_config))
+
+    add_once_calls: list[str] = []
+
+    def fake_add_once(url: str, *args: object, **kwargs: object) -> pipeline.AddResult:
+        add_once_calls.append(url)
+        return pipeline.AddResult(reader_url=_READER_URL, deduped=False)
+
+    monkeypatch.setattr(pipeline, "add_once", fake_add_once)
+
+    result = runner.invoke(app, ["add", art1, feed_url, art2])
+    output = result.output + (result.stderr or "")
+
+    assert result.exit_code == 1
+    assert "1 ok, 2 failed" in result.output
+    assert "readwise.io/access_token" in output
+    # The feed subscribe in the same batch proceeded without a token.
+    assert [s.url for s in load_config().subscriptions] == [feed_url]
+    # Creation was attempted exactly once (the failure is remembered) and the
+    # one-shots never reached the pipeline.
+    assert len(creation_attempts) == 1
+    assert add_once_calls == []
+
+
+def test_add_rate_limited_autodetect_fails_cleanly_and_batch_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RateLimited from the transport during feed auto-detection is a pulpwise
+    FetchError, not an httpx error - it must fail that URL, not abort the batch."""
+    from pulpwise import pipeline
+
+    limited = "https://limited.example/"
+    feed_url = "https://ok.example/feed"
+    feed_body = _feed()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == feed_url:
+            return httpx.Response(200, text=feed_body)
+        raise RateLimited("429 kept answering through retries", host="limited.example")
+
+    def fake_build_client(*args: object, **kwargs: object) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(cli, "build_client", fake_build_client)
+    _patch_sink(monkeypatch)
+
+    def fake_add_once(url: str, *args: object, **kwargs: object) -> pipeline.AddResult:
+        raise RateLimited("rate limited by limited.example: cooling down", host="limited.example")
+
+    monkeypatch.setattr(pipeline, "add_once", fake_add_once)
+
+    result = runner.invoke(app, ["add", limited, feed_url])
+    output = result.output + (result.stderr or "")
+
+    assert not isinstance(result.exception, RateLimited)  # no traceback abort
+    assert "fetch failed" in output  # the limited URL failed cleanly
+    assert "1 ok, 1 failed" in result.output  # ...and the batch kept going
+    assert result.exit_code == 1
+    assert [s.url for s in load_config().subscriptions] == [feed_url]
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        FetchError("archive page fetch failed: HTTP 500"),
+        ExtractionError("empty body"),
+        ConfigError("subscription 'alpha': options.location must be one of feed, later, new"),
+    ],
+)
+def test_backfill_operational_errors_exit_cleanly(
+    monkeypatch: pytest.MonkeyPatch, exc: Exception
+) -> None:
+    """FetchError from pagination / ConfigError from bad options must not traceback."""
+    from pulpwise import pipeline
+
+    config = Config(
+        subscriptions=(Subscription(name="alpha", source="substack", url="https://a.example"),)
+    )
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+
+    def fake_backfill(*args: object, **kwargs: object) -> pipeline.BackfillReport:
+        raise exc
+
+    monkeypatch.setattr(pipeline, "backfill", fake_backfill)
+
+    result = runner.invoke(app, ["backfill", "alpha"])
+    output = result.output + (result.stderr or "")
+    assert result.exit_code == 1
+    assert str(exc) in output
+    assert not isinstance(result.exception, (FetchError, ExtractionError, ConfigError))
+
+
+def test_sync_auth_error_exits_one_with_setup_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing/rejected Readwise token fails the whole run loudly, exit 1."""
+    from pulpwise import pipeline
+
+    config = Config(subscriptions=(Subscription(name="alpha", source="rss", url="https://a/feed"),))
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+
+    def fake_sync(**kwargs: object) -> pipeline.SyncTotal:
+        raise ReadwiseAuthError(
+            "no Readwise access token configured; get one at https://readwise.io/access_token"
+        )
+
+    monkeypatch.setattr(pipeline, "sync", fake_sync)
+
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 1
+    assert "readwise.io/access_token" in (result.output + (result.stderr or ""))

@@ -1,21 +1,21 @@
-"""Tests for RSSSource - feed parsing, content fallback, two-phase shape."""
+"""Tests for RSSSource - feed discovery, category filtering, no-fetch contract."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
 import httpx
+import pytest
 
-from pulpline.models import ItemRef
-from pulpline.sources.rss import RSSSource
+from pulpwise.models import ExtractionError, FetchError, ItemRef
+from pulpwise.sources.rss import RSSSource
+from tests.conftest import FIXTURES
 
 ClientFactory = Callable[[dict[str, str]], httpx.Client]
 
 
 def _read_feed_fixture() -> str:
-    from pathlib import Path
-
-    return (Path(__file__).parent / "fixtures" / "sample_feed.xml").read_text()
+    return (FIXTURES / "sample_feed.xml").read_text()
 
 
 def test_discover_yields_one_ref_per_entry(mock_client_factory: ClientFactory) -> None:
@@ -26,45 +26,55 @@ def test_discover_yields_one_ref_per_entry(mock_client_factory: ClientFactory) -
         refs = list(source.discover(feed_url))
 
     assert len(refs) == 2
-    assert {r.url for r in refs} == {
-        "https://example.com/full",
-        "https://example.com/teaser",
-    }
-    titles = {r.title for r in refs}
-    assert "Full Content Article" in titles
+    by_url = {r.url: r for r in refs}
+    assert set(by_url) == {"https://example.com/full", "https://example.com/teaser"}
+
+    full = by_url["https://example.com/full"]
+    assert full.title == "Full Content Article"
+    assert full.guid == "tag:example.com,2026:full"
+    assert full.pub_date is not None
+    assert (full.pub_date.year, full.pub_date.month, full.pub_date.day) == (2026, 4, 28)
 
 
-def test_fetch_uses_feed_supplied_content_when_substantial(
-    mock_client_factory: ClientFactory,
-) -> None:
+def test_rss_is_a_no_fetch_source() -> None:
+    assert RSSSource.fetch_needed is False
+
+
+def test_fetch_raises_not_implemented() -> None:
+    with (
+        RSSSource(client=httpx.Client()) as source,
+        pytest.raises(NotImplementedError, match="bare-URL saves"),
+    ):
+        source.fetch(ItemRef(url="https://example.com/full"))
+
+
+def test_submission_for_ref_is_a_bare_url_save(mock_client_factory: ClientFactory) -> None:
     feed_url = "https://example.com/feed"
     client = mock_client_factory({feed_url: _read_feed_fixture()})
 
     with RSSSource(client=client) as source:
-        list(source.discover(feed_url))
-        article = source.fetch(ItemRef(url="https://example.com/full"))
+        refs = list(source.discover(feed_url))
+        submission = source.submission_for_ref(refs[0])
 
-    assert article.title == "Full Content Article"
-    assert "first paragraph" in article.body_html
-    assert article.source_url == feed_url
-    assert article.publisher == "Stratechery by Ben Thompson"
+    assert submission.url == refs[0].url
+    assert submission.html is None
+    assert submission.kind == "url"
+    assert submission.title == refs[0].title
 
 
-def test_fetch_falls_back_to_url_when_feed_summary_only(
-    mock_client_factory: ClientFactory, sample_html: str
+def test_discover_http_failure_raises_fetch_error(mock_client_factory: ClientFactory) -> None:
+    client = mock_client_factory({})  # 404 everywhere
+    with RSSSource(client=client) as source, pytest.raises(FetchError):
+        list(source.discover("https://example.com/feed"))
+
+
+def test_discover_unparseable_body_raises_extraction_error(
+    mock_client_factory: ClientFactory,
 ) -> None:
     feed_url = "https://example.com/feed"
-    article_url = "https://example.com/teaser"
-    client = mock_client_factory({feed_url: _read_feed_fixture(), article_url: sample_html})
-
-    with RSSSource(client=client) as source:
+    client = mock_client_factory({feed_url: "<<< not a feed at all >>>"})
+    with RSSSource(client=client) as source, pytest.raises(ExtractionError):
         list(source.discover(feed_url))
-        article = source.fetch(ItemRef(url=article_url))
-
-    # Body came from trafilatura on the article URL, not from the feed teaser.
-    assert "the first substantive paragraph" in article.body_html.lower()
-    # source_url is still the feed URL so dc:source records the feed.
-    assert article.source_url == feed_url
 
 
 # --- category filtering -------------------------------------------------------
@@ -161,15 +171,8 @@ def test_exclude_wins_over_include(mock_client_factory: ClientFactory) -> None:
     assert urls == {"https://example.com/essay"}
 
 
-def test_filtered_entries_never_reach_fetch_cache(mock_client_factory: ClientFactory) -> None:
-    client = mock_client_factory({_CATEGORIZED_FEED_URL: _CATEGORIZED_FEED})
-    with RSSSource(client=client, categories=frozenset({"recommended reading"})) as source:
-        list(source.discover(_CATEGORIZED_FEED_URL))
-        assert "https://example.com/talk" not in source._entries
-
-
 def test_from_config_parses_category_options() -> None:
-    from pulpline.config import Config, Subscription
+    from pulpwise.config import Config, Subscription
 
     sub = Subscription(
         name="links",
@@ -184,7 +187,7 @@ def test_from_config_parses_category_options() -> None:
 
 
 def test_from_config_without_options_applies_no_filter() -> None:
-    from pulpline.config import Config, Subscription
+    from pulpwise.config import Config, Subscription
 
     sub = Subscription(name="links", source="rss", url=_CATEGORIZED_FEED_URL)
     source = RSSSource.from_config(Config(), subscription=sub)
@@ -194,7 +197,7 @@ def test_from_config_without_options_applies_no_filter() -> None:
 
 
 def test_blank_category_option_means_no_filter() -> None:
-    from pulpline.config import Config, Subscription
+    from pulpwise.config import Config, Subscription
 
     # `categories = " , "` parsing to an empty set would silently drop every
     # entry; blanks must collapse to "no constraint" instead.

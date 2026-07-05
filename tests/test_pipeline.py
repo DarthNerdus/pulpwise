@@ -1,95 +1,117 @@
-"""Integration test for pipeline.add_once - real trafilatura, real ebooklib, mocked HTTP."""
+"""Tests for pipeline.add_once - real sources + a real ReadwiseSink over MockTransport."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
 
 import httpx
-import pytest
-from ebooklib import epub
 
-from pulpline import pipeline
-from pulpline.config import Config, Paths
+from pulpwise import pipeline
+from pulpwise.config import Config
+from pulpwise.sinks.readwise import ReadwiseSink
+from pulpwise.state import connect, is_seen
+from pulpwise.util.dedup import dedup_key
+from tests.conftest import FIXTURES, FakeReadwise
 
-ClientFactory = Callable[[dict[str, str]], httpx.Client]
+URL = "https://example.com/article"
 
 
-def test_add_once_writes_a_real_epub(
-    tmp_path: Path, mock_client_factory: ClientFactory, sample_html: str
+def test_add_once_pushes_url_and_records_ledger(
+    fake_readwise: FakeReadwise, readwise_sink: ReadwiseSink
 ) -> None:
-    url = "https://example.com/article"
-    client = mock_client_factory({url: sample_html})
+    result = pipeline.add_once(URL, config=Config(), sink=readwise_sink)
 
-    out_path = pipeline.add_once(url, output_dir=tmp_path, client=client)
+    assert result.deduped is False
+    assert result.already_in_readwise is False
+    assert result.reader_url == "https://read.readwise.io/read/doc-1"
 
-    assert out_path.exists()
-    assert out_path.suffix == ".epub"
-    # One-shots land in the `oneshots/` subfolder under the configured output dir.
-    assert out_path.parent == tmp_path / "oneshots"
+    # URLSource is the fallback: a bare-URL save, no html.
+    payload = fake_readwise.save_payloads[0]
+    assert payload["url"] == URL
+    assert "html" not in payload
 
-    book = epub.read_epub(str(out_path))
-    titles = book.get_metadata("DC", "title")
-    assert titles
-    assert titles[0][0] == "The End of the Beginning"
+    with connect() as conn:
+        assert is_seen(conn, dedup_key(URL)) == "https://read.readwise.io/read/doc-1"
+        row = conn.execute("SELECT * FROM items").fetchone()
+        assert row["subscription_name"] is None
+        assert row["readwise_id"] == "doc-1"
+        assert row["submission_kind"] == "url"
 
 
-def test_add_once_uses_default_output_dir_when_none(
-    tmp_path: Path,
-    mock_client_factory: ClientFactory,
-    sample_html: str,
-    monkeypatch: pytest.MonkeyPatch,
+def test_add_once_second_run_dedupes_without_pushing(
+    fake_readwise: FakeReadwise, readwise_sink: ReadwiseSink
 ) -> None:
-    monkeypatch.setenv("PULPLINE_OUTPUT_DIR", str(tmp_path))
-    url = "https://example.com/article"
-    client = mock_client_factory({url: sample_html})
+    first = pipeline.add_once(URL, config=Config(), sink=readwise_sink)
+    second = pipeline.add_once(URL, config=Config(), sink=readwise_sink)
 
-    out_path = pipeline.add_once(url, client=client)
+    assert second.deduped is True
+    assert second.reader_url == first.reader_url
+    assert len(fake_readwise.save_payloads) == 1  # nothing was re-pushed
 
-    assert out_path.parent == tmp_path / "oneshots"
 
-
-def test_add_once_falls_back_to_config_paths_output_dir(
-    tmp_path: Path,
-    mock_client_factory: ClientFactory,
-    sample_html: str,
-    monkeypatch: pytest.MonkeyPatch,
+def test_add_once_reports_already_in_readwise(
+    fake_readwise: FakeReadwise, readwise_sink: ReadwiseSink
 ) -> None:
-    """Without an explicit arg or env var, one-shots follow `paths.output_dir`."""
-    monkeypatch.delenv("PULPLINE_OUTPUT_DIR")
-    cfg = Config(paths=Paths(output_dir=str(tmp_path / "from-config")))
-    url = "https://example.com/article"
-    client = mock_client_factory({url: sample_html})
+    """Reader already knows the URL (pushed from another device, say): the
+    save answers 200 and the result reports it, but it is not a ledger dedup."""
+    fake_readwise.documents[URL] = "doc-77"
 
-    out_path = pipeline.add_once(url, client=client, config=cfg)
+    result = pipeline.add_once(URL, config=Config(), sink=readwise_sink)
 
-    assert out_path.parent == tmp_path / "from-config" / "oneshots"
+    assert result.deduped is False
+    assert result.already_in_readwise is True
+    assert result.reader_url == fake_readwise.reader_url("doc-77")
 
 
-def test_add_once_honors_source_output_dir_override(tmp_path: Path) -> None:
-    """[auth.annas].output_dir routes annas downloads to a dedicated folder,
-    even when a base output_dir is passed explicitly."""
-    md5 = "abcdef0123456789abcdef0123456789"
-    url = f"https://annas-archive.gl/md5/{md5}"
-    api_url = "https://annas-archive.gl/dyn/api/fast_download.json"
-    download_url = "https://download.example/server/A_Real_Book.epub"
+def test_add_once_passes_location_and_tags(
+    fake_readwise: FakeReadwise, readwise_sink: ReadwiseSink
+) -> None:
+    pipeline.add_once(URL, config=Config(), sink=readwise_sink, location="later", tags=("essays",))
+
+    payload = fake_readwise.save_payloads[0]
+    assert payload["location"] == "later"
+    assert payload["tags"] == ["essays"]
+
+
+def test_add_once_defaults_to_feed_location(
+    fake_readwise: FakeReadwise, readwise_sink: ReadwiseSink
+) -> None:
+    pipeline.add_once(URL, config=Config(), sink=readwise_sink)
+
+    assert fake_readwise.save_payloads[0]["location"] == "feed"
+
+
+def test_add_once_routes_arxiv_urls_to_pdf_submission(
+    fake_readwise: FakeReadwise, readwise_sink: ReadwiseSink
+) -> None:
+    """arxiv.org/abs/... is claimed by ArXivSource: one metadata round-trip,
+    then a bare-URL save of the /pdf/ URL with the pdf category hint."""
+    atom = (FIXTURES / "sample_arxiv.xml").read_bytes()
 
     def handler(request: httpx.Request) -> httpx.Response:
-        target = str(request.url).split("?")[0]
-        if target == api_url:
-            return httpx.Response(200, json={"download_url": download_url})
-        if target == download_url:
-            return httpx.Response(200, content=b"fake epub bytes")
-        return httpx.Response(404, text=f"unmocked: {target}")
+        if request.url.host == "export.arxiv.org" and request.url.path == "/api/query":
+            return httpx.Response(200, content=atom)
+        return httpx.Response(404, text=f"unmocked: {request.url}")
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    books_dir = tmp_path / "books"
-    cfg = Config(
-        auth={"annas": {"api_key": "test-key", "mirrors": "gl", "output_dir": str(books_dir)}}
+    result = pipeline.add_once(
+        "https://arxiv.org/abs/2401.12345", client=client, config=Config(), sink=readwise_sink
     )
 
-    out_path = pipeline.add_once(url, output_dir=tmp_path, client=client, config=cfg)
+    assert result.deduped is False
+    payload = fake_readwise.save_payloads[0]
+    assert payload["url"] == "http://arxiv.org/pdf/2401.12345v1"
+    assert payload["category"] == "pdf"
+    assert payload["title"] == "Attention is All You Really Need"
+    assert "html" not in payload
 
-    assert out_path.parent == books_dir
-    assert out_path.suffix == ".epub"
-    assert out_path.read_bytes() == b"fake epub bytes"
+
+def test_add_once_records_state_at_explicit_path(
+    tmp_path: Path, fake_readwise: FakeReadwise, readwise_sink: ReadwiseSink
+) -> None:
+    db = tmp_path / "custom-state.db"
+    pipeline.add_once(URL, config=Config(), sink=readwise_sink, state_path=db)
+
+    assert db.exists()
+    with connect(db) as conn:
+        assert is_seen(conn, dedup_key(URL)) is not None

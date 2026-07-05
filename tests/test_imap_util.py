@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from pulpline.models import FetchError
-from pulpline.util.imap import (
+from pulpwise.models import FetchError
+from pulpwise.util.imap import (
     ImapSession,
     MimePart,
     _flatten_fetch_records,
@@ -23,10 +23,10 @@ if TYPE_CHECKING:
 
 class TestParseMailboxUrl:
     def test_imaps_defaults(self) -> None:
-        loc = parse_mailbox_url("imaps://imap.gmail.com/Pulpline")
+        loc = parse_mailbox_url("imaps://imap.gmail.com/Pulpwise")
         assert loc.host == "imap.gmail.com"
         assert loc.port == 993
-        assert loc.folder == "Pulpline"
+        assert loc.folder == "Pulpwise"
         assert loc.starttls is False
 
     def test_imap_starttls_defaults(self) -> None:

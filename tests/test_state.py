@@ -1,29 +1,55 @@
-"""Tests for SQLite state: dedup ledger + per-subscription run state."""
+"""Tests for SQLite state: dedup ledger, tombstones, legacy migration, counters."""
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
-from pulpline.state import (
+from pulpwise.state import (
     ItemRecord,
     connect,
+    count_by_kind,
+    count_by_subscription,
+    count_total,
+    delete_item,
     get_subscription_state,
     is_seen,
+    items_per_day,
+    list_items,
+    list_oneshots,
+    list_recently_deleted,
     record_item,
     update_subscription_state,
+    was_ingested,
 )
 
 
-def _record(dedup: str = "k1", path: str = "/tmp/x.epub") -> ItemRecord:
+def _record(
+    dedup: str = "k1",
+    *,
+    sub: str | None = "sub",
+    url: str = "https://example.com/x",
+    title: str | None = "Title",
+    rw_id: str = "doc-1",
+    rw_url: str = "https://read.readwise.io/read/doc-1",
+    kind: str = "url",
+) -> ItemRecord:
     return ItemRecord(
-        subscription_name="sub",
+        subscription_name=sub,
         source_url="https://feed",
         dedup_key=dedup,
-        canonical_url="https://example.com/x",
-        title="Title",
+        canonical_url=url,
+        title=title,
         pub_date=None,
-        output_path=path,
+        readwise_id=rw_id,
+        readwise_url=rw_url,
+        submission_kind=kind,
     )
+
+
+def _item_id(conn: sqlite3.Connection, dedup: str) -> int:
+    row = conn.execute("SELECT id FROM items WHERE dedup_key = ?", (dedup,)).fetchone()
+    return int(row["id"])
 
 
 def test_init_creates_tables(tmp_path: Path) -> None:
@@ -35,345 +61,340 @@ def test_init_creates_tables(tmp_path: Path) -> None:
     assert "items" in names
 
 
-def test_is_seen_returns_path_after_record(tmp_path: Path) -> None:
+def test_record_then_is_seen_returns_reader_url(tmp_path: Path) -> None:
     db = tmp_path / "state.db"
     with connect(db) as conn:
         assert is_seen(conn, "k1") is None
-        record_item(conn, _record(dedup="k1", path="/tmp/article.epub"))
-        assert is_seen(conn, "k1") == "/tmp/article.epub"
+        record_item(conn, _record(dedup="k1", rw_url="https://read.readwise.io/read/doc-1"))
+        assert is_seen(conn, "k1") == "https://read.readwise.io/read/doc-1"
 
 
 def test_record_item_upserts_on_duplicate_dedup_key(tmp_path: Path) -> None:
-    """Re-recording with an existing dedup_key updates the row in place.
-
-    This handles re-ingestion after a soft delete: `pulp add <url>` on a
-    previously-deleted article should not fail on the UNIQUE constraint.
-    """
-    from pulpline.state import is_seen
-
+    """Re-recording with an existing dedup_key updates the row in place."""
     db = tmp_path / "state.db"
     with connect(db) as conn:
-        record_item(conn, _record(dedup="k1", path="/tmp/old.epub"))
-        record_item(conn, _record(dedup="k1", path="/tmp/new.epub"))
-        # Single row, with the latest output_path.
-        rows = conn.execute("SELECT output_path FROM items WHERE dedup_key = ?", ("k1",)).fetchall()
+        record_item(conn, _record(dedup="k1", rw_id="old", rw_url="https://r/old", kind="url"))
+        record_item(conn, _record(dedup="k1", rw_id="new", rw_url="https://r/new", kind="html"))
+
+        rows = conn.execute(
+            "SELECT readwise_id, readwise_url, submission_kind FROM items WHERE dedup_key = 'k1'"
+        ).fetchall()
         assert len(rows) == 1
-        assert is_seen(conn, "k1") == "/tmp/new.epub"
+        assert rows[0]["readwise_id"] == "new"
+        assert rows[0]["submission_kind"] == "html"
+        assert is_seen(conn, "k1") == "https://r/new"
 
 
-def test_was_ingested_distinguishes_from_is_seen(tmp_path: Path) -> None:
+def test_is_seen_vs_was_ingested_after_soft_delete(tmp_path: Path) -> None:
     """`was_ingested` is True even after a soft delete; `is_seen` is not."""
-    from pulpline.state import delete_item, is_seen, was_ingested
-
     db = tmp_path / "state.db"
-    target_file = tmp_path / "kept.epub"
-    target_file.write_bytes(b"x")
-
     with connect(db) as conn:
-        record_item(conn, _record(dedup="k1", path=str(target_file)))
-        assert is_seen(conn, "k1") == str(target_file)
+        record_item(conn, _record(dedup="k1"))
+        assert is_seen(conn, "k1") is not None
         assert was_ingested(conn, "k1") is True
 
-        item_id = conn.execute("SELECT id FROM items WHERE dedup_key = ?", ("k1",)).fetchone()["id"]
-        delete_item(conn, item_id)
+        delete_item(conn, _item_id(conn, "k1"))
 
-        # File is gone, output_path is null.
-        assert not target_file.exists()
         assert is_seen(conn, "k1") is None
         assert was_ingested(conn, "k1") is True
 
 
-def test_delete_item_then_record_revives(tmp_path: Path) -> None:
-    """Soft-deleted items can be re-ingested via the record_item upsert."""
-    from pulpline.state import delete_item, is_seen
-
+def test_is_seen_none_for_unpushed_legacy_rows(tmp_path: Path) -> None:
+    """A live row without a readwise_url (legacy file-era) is not 'seen' but
+    is 'ingested' - add can re-push it, sync must not."""
     db = tmp_path / "state.db"
-    f1 = tmp_path / "v1.epub"
-    f1.write_bytes(b"x")
     with connect(db) as conn:
-        record_item(conn, _record(dedup="k1", path=str(f1)))
-        item_id = conn.execute("SELECT id FROM items WHERE dedup_key = ?", ("k1",)).fetchone()["id"]
+        conn.execute(
+            "INSERT INTO items (subscription_name, source_url, dedup_key, canonical_url, "
+            "ingested_at) VALUES ('sub', 'https://feed', 'legacy', 'https://x', "
+            "'2025-01-01T00:00:00+00:00')"
+        )
+        conn.commit()
+
+        assert is_seen(conn, "legacy") is None
+        assert was_ingested(conn, "legacy") is True
+
+
+def test_delete_item_tombstones_but_keeps_readwise_fields(tmp_path: Path) -> None:
+    """Push-only contract: delete tombstones the row locally and touches
+    nothing remote - the Reader document identifiers stay on the row."""
+    db = tmp_path / "state.db"
+    with connect(db) as conn:
+        record_item(conn, _record(dedup="k1", rw_id="doc-9"))
+        item_id = _item_id(conn, "k1")
+
         delete_item(conn, item_id)
 
-        # Re-ingest with new path.
-        f2 = tmp_path / "v2.epub"
-        f2.write_bytes(b"y")
-        record_item(conn, _record(dedup="k1", path=str(f2)))
+        row = conn.execute(
+            "SELECT deleted_at, readwise_id FROM items WHERE id = ?", (item_id,)
+        ).fetchone()
+        assert row["deleted_at"] is not None
+        assert row["deleted_at"][:4].isdigit()  # ISO timestamp
+        assert row["readwise_id"] == "doc-9"
 
-        assert is_seen(conn, "k1") == str(f2)
+
+def test_delete_item_tombstones_legacy_rows(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    with connect(db) as conn:
+        conn.execute(
+            "INSERT INTO items (subscription_name, source_url, dedup_key, canonical_url, "
+            "ingested_at) VALUES (NULL, 'https://x', 'legacy', 'https://x', "
+            "'2025-01-01T00:00:00+00:00')"
+        )
+        conn.commit()
+        item_id = _item_id(conn, "legacy")
+
+        delete_item(conn, item_id)
+        assert was_ingested(conn, "legacy") is True  # tombstoned, not erased
+
+
+def test_delete_item_on_missing_id_is_a_noop(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    with connect(db) as conn:
+        delete_item(conn, 12345)  # must not raise
+
+
+def test_record_item_revives_tombstone(tmp_path: Path) -> None:
+    """Re-add after delete clears deleted_at and installs the new Reader doc."""
+    db = tmp_path / "state.db"
+    with connect(db) as conn:
+        record_item(conn, _record(dedup="k1", rw_id="doc-1", rw_url="https://r/1"))
+        item_id = _item_id(conn, "k1")
+        delete_item(conn, item_id)
+
+        record_item(conn, _record(dedup="k1", rw_id="doc-2", rw_url="https://r/2", kind="html"))
+
+        row = conn.execute(
+            "SELECT id, deleted_at, readwise_id, readwise_url, submission_kind "
+            "FROM items WHERE dedup_key = 'k1'"
+        ).fetchone()
+        assert row["id"] == item_id  # same row, revived in place
+        assert row["deleted_at"] is None
+        assert row["readwise_id"] == "doc-2"
+        assert row["readwise_url"] == "https://r/2"
+        assert row["submission_kind"] == "html"
+        assert is_seen(conn, "k1") == "https://r/2"
+
+
+# ---- legacy pulpline migration --------------------------------------------------
+
+
+def _create_legacy_pulpline_db(path: Path) -> None:
+    """The old pulpline schema: file-sink era, liveness = output_path IS NOT NULL."""
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE subscription_state (
+                name TEXT PRIMARY KEY,
+                last_synced_at TEXT,
+                last_status TEXT,
+                last_error TEXT
+            );
+            CREATE TABLE items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subscription_name TEXT,
+                source_url TEXT NOT NULL,
+                dedup_key TEXT NOT NULL UNIQUE,
+                canonical_url TEXT NOT NULL,
+                title TEXT,
+                pub_date TEXT,
+                ingested_at TEXT NOT NULL,
+                output_path TEXT
+            );
+            CREATE INDEX idx_items_subscription ON items(subscription_name);
+            """
+        )
+        conn.execute(
+            "INSERT INTO items (subscription_name, source_url, dedup_key, canonical_url, "
+            "title, ingested_at, output_path) VALUES "
+            "('sub', 'https://feed', 'live-key', 'https://x/live', 'Live', "
+            "'2025-03-01T10:00:00+00:00', '/tmp/live.epub')"
+        )
+        conn.execute(
+            "INSERT INTO items (subscription_name, source_url, dedup_key, canonical_url, "
+            "title, ingested_at, output_path) VALUES "
+            "('sub', 'https://feed', 'dead-key', 'https://x/dead', 'Dead', "
+            "'2025-02-01T10:00:00+00:00', NULL)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_legacy_pulpline_db_migrates_in_place(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    _create_legacy_pulpline_db(db)
+
+    with connect(db) as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(items)")}
+        assert {"readwise_id", "readwise_url", "submission_kind", "deleted_at"} <= columns
+        sub_columns = {row["name"] for row in conn.execute("PRAGMA table_info(subscription_state)")}
+        assert "total_items" in sub_columns
+
+        # The legacy tombstone (output_path NULL) got deleted_at backfilled
+        # with its ingested_at - the real deletion time was never recorded.
+        dead = conn.execute("SELECT * FROM items WHERE dedup_key = 'dead-key'").fetchone()
+        assert dead["deleted_at"] == "2025-02-01T10:00:00+00:00"
+
+        # The live row stayed live.
+        live = conn.execute("SELECT * FROM items WHERE dedup_key = 'live-key'").fetchone()
+        assert live["deleted_at"] is None
+
+        # Sync must skip both; add must consider neither already-in-Reader.
+        assert was_ingested(conn, "live-key") is True
+        assert was_ingested(conn, "dead-key") is True
+        assert is_seen(conn, "live-key") is None
+        assert is_seen(conn, "dead-key") is None
+
+
+def test_legacy_migration_is_idempotent(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    _create_legacy_pulpline_db(db)
+
+    with connect(db):
+        pass
+    with connect(db) as conn:  # second connect re-runs the migration list
+        dead = conn.execute("SELECT deleted_at FROM items WHERE dedup_key = 'dead-key'").fetchone()
+        assert dead["deleted_at"] == "2025-02-01T10:00:00+00:00"
+
+
+def test_legacy_migration_never_tombstones_pulpwise_rows(tmp_path: Path) -> None:
+    """New rows written into a migrated legacy DB have output_path NULL too -
+    the backfill UPDATE re-runs on every connect and must not sweep them up
+    (that would soft-delete every document pushed since the migration)."""
+    db = tmp_path / "state.db"
+    _create_legacy_pulpline_db(db)
+
+    with connect(db) as conn:  # first connect migrates
+        record_item(
+            conn,
+            ItemRecord(
+                subscription_name="sub",
+                source_url="https://feed",
+                dedup_key="new-key",
+                canonical_url="https://x/new",
+                title="New",
+                pub_date=None,
+                readwise_id="doc-1",
+                readwise_url="https://read.readwise.io/read/doc-1",
+                submission_kind="url",
+            ),
+        )
+
+    with connect(db) as conn:  # second connect re-runs the backfill UPDATE
+        row = conn.execute("SELECT deleted_at FROM items WHERE dedup_key = 'new-key'").fetchone()
+        assert row["deleted_at"] is None
+        assert is_seen(conn, "new-key") == "https://read.readwise.io/read/doc-1"
+
+
+# ---- listings + counters --------------------------------------------------------
 
 
 def test_list_items_excludes_soft_deleted(tmp_path: Path) -> None:
-    from pulpline.state import delete_item, list_items
-
     db = tmp_path / "state.db"
     with connect(db) as conn:
-        record_item(conn, _record(dedup="k1", path="/tmp/a.epub"))
-        record_item(conn, _record(dedup="k2", path="/tmp/b.epub"))
-        item_id = conn.execute("SELECT id FROM items WHERE dedup_key = ?", ("k1",)).fetchone()["id"]
-        delete_item(conn, item_id)
+        record_item(conn, _record(dedup="k1", url="https://x/a"))
+        record_item(conn, _record(dedup="k2", url="https://x/b"))
+        delete_item(conn, _item_id(conn, "k1"))
 
         items = list_items(conn)
     assert len(items) == 1
-    assert items[0].output_path == "/tmp/b.epub"
-
-
-def test_list_items_returns_recent_first(tmp_path: Path) -> None:
-    from pulpline.state import list_items
-
-    db = tmp_path / "state.db"
-    with connect(db) as conn:
-        record_item(conn, _record(dedup="k1", path="/tmp/a.epub"))
-        record_item(conn, _record(dedup="k2", path="/tmp/b.epub"))
-        items = list_items(conn, limit=10)
-
-    assert len(items) == 2
-    # Most recent first - both inserted close together but k2 second.
-    assert items[0].output_path == "/tmp/b.epub"
+    assert items[0].canonical_url == "https://x/b"
+    assert items[0].readwise_url == "https://read.readwise.io/read/doc-1"
 
 
 def test_list_items_limit_none_returns_everything(tmp_path: Path) -> None:
-    """The library view passes limit=None so the list is complete. A cap
-    turned deletes into whack-a-mole: each removal slid the next-oldest
-    item into the visible window."""
-    from pulpline.state import list_items
-
     db = tmp_path / "state.db"
     with connect(db) as conn:
         for i in range(600):
-            record_item(conn, _record(dedup=f"k{i}", path=f"/tmp/{i}.epub"))
+            record_item(conn, _record(dedup=f"k{i}"))
 
         assert len(list_items(conn)) == 500  # default cap still applies
         assert len(list_items(conn, limit=3)) == 3
         assert len(list_items(conn, limit=None)) == 600
 
 
-def test_list_recently_deleted_limit_none_returns_everything(tmp_path: Path) -> None:
-    from pulpline.state import delete_item, list_recently_deleted
-
-    db = tmp_path / "state.db"
-    with connect(db) as conn:
-        for i in range(250):
-            record_item(conn, _record(dedup=f"k{i}", path=f"/tmp/{i}.epub"))
-        for (item_id,) in conn.execute("SELECT id FROM items").fetchall():
-            delete_item(conn, item_id)
-
-        assert len(list_recently_deleted(conn)) == 200  # default cap still applies
-        assert len(list_recently_deleted(conn, limit=None)) == 250
-
-
 def test_list_items_filter_text(tmp_path: Path) -> None:
-    from pulpline.state import ItemRecord, list_items
-
     db = tmp_path / "state.db"
     with connect(db) as conn:
-        record_item(
-            conn,
-            ItemRecord(
-                subscription_name=None,
-                source_url="https://x.example/",
-                dedup_key="k1",
-                canonical_url="https://x.example/about-cats",
-                title="Cats are great",
-                pub_date=None,
-                output_path="/tmp/cats.epub",
-            ),
-        )
-        record_item(
-            conn,
-            ItemRecord(
-                subscription_name=None,
-                source_url="https://y.example/",
-                dedup_key="k2",
-                canonical_url="https://y.example/dogs",
-                title="Dogs are okay",
-                pub_date=None,
-                output_path="/tmp/dogs.epub",
-            ),
-        )
-        items = list_items(conn, filter_text="cats")
+        record_item(conn, _record(dedup="k1", title="Cats are great", url="https://x/about-cats"))
+        record_item(conn, _record(dedup="k2", title="Dogs are okay", url="https://x/dogs"))
 
+        items = list_items(conn, filter_text="cats")
     assert len(items) == 1
     assert items[0].title == "Cats are great"
 
 
-def test_count_helpers(tmp_path: Path) -> None:
-    from pulpline.state import count_by_extension, count_by_subscription, count_total
-
+def test_list_recently_deleted(tmp_path: Path) -> None:
     db = tmp_path / "state.db"
     with connect(db) as conn:
-        record_item(conn, _record(dedup="k1", path="/tmp/a.epub"))
-        record_item(conn, _record(dedup="k2", path="/tmp/b.pdf"))
-        record_item(conn, _record(dedup="k3", path="/tmp/c.epub"))
+        record_item(conn, _record(dedup="k1", url="https://x/live"))
+        record_item(conn, _record(dedup="k2", url="https://x/dead"))
+        dead_id = _item_id(conn, "k2")
+        delete_item(conn, dead_id)
+
+        deleted = list_recently_deleted(conn)
+    assert len(deleted) == 1
+    assert deleted[0].id == dead_id
+    assert deleted[0].deleted_at is not None
+
+
+def test_list_oneshots_only_shows_live_unsubscribed_items(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    with connect(db) as conn:
+        record_item(conn, _record(dedup="k1", sub=None, url="https://x/once"))
+        record_item(conn, _record(dedup="k2", sub="sub", url="https://x/synced"))
+        record_item(conn, _record(dedup="k3", sub=None, url="https://x/gone"))
+        delete_item(conn, _item_id(conn, "k3"))
+
+        oneshots = list_oneshots(conn)
+    assert [o.canonical_url for o in oneshots] == ["https://x/once"]
+    assert oneshots[0].readwise_url == "https://read.readwise.io/read/doc-1"
+
+
+def test_count_by_kind_buckets_url_html_and_legacy_file(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    with connect(db) as conn:
+        record_item(conn, _record(dedup="k1", kind="url"))
+        record_item(conn, _record(dedup="k2", kind="html"))
+        record_item(conn, _record(dedup="k3", kind="url"))
+        # Legacy file-era row: live, no submission_kind.
+        conn.execute(
+            "INSERT INTO items (subscription_name, source_url, dedup_key, canonical_url, "
+            "ingested_at) VALUES ('sub', 'https://feed', 'k4', 'https://x/file', "
+            "'2025-01-01T00:00:00+00:00')"
+        )
+        # Deleted rows don't count.
+        record_item(conn, _record(dedup="k5", kind="html"))
+        delete_item(conn, _item_id(conn, "k5"))
+
+        assert count_by_kind(conn) == {"url": 2, "html": 1, "file": 1}
+
+
+def test_count_helpers(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    with connect(db) as conn:
+        record_item(conn, _record(dedup="k1"))
+        record_item(conn, _record(dedup="k2"))
+        record_item(conn, _record(dedup="k3", sub=None))
 
         assert count_total(conn) == 3
-        # All three have subscription_name="sub" via _record default
-        assert count_by_subscription(conn) == {"sub": 3}
-        assert count_by_extension(conn) == {"epub": 2, "pdf": 1}
+        assert count_by_subscription(conn) == {"sub": 2, "[one-shot]": 1}
 
 
 def test_items_per_day_includes_zeros(tmp_path: Path) -> None:
-    from pulpline.state import items_per_day
-
     db = tmp_path / "state.db"
     with connect(db) as conn:
         record_item(conn, _record(dedup="k1"))
         per_day = items_per_day(conn, days=7)
 
     assert len(per_day) == 7
-    # Today's entry should have count 1; other days should be 0.
     counts = {day: n for day, n in per_day}
     assert sum(counts.values()) == 1
 
 
-def test_delete_item_records_deleted_at(tmp_path: Path) -> None:
-    """Soft-delete writes a timestamp so we can group deletions by day later."""
-    from pulpline.state import delete_item
-
-    db = tmp_path / "state.db"
-    with connect(db) as conn:
-        record_item(conn, _record(dedup="k1", path="/tmp/x.epub"))
-        item_id = conn.execute("SELECT id FROM items WHERE dedup_key = ?", ("k1",)).fetchone()["id"]
-        delete_item(conn, item_id)
-
-        row = conn.execute(
-            "SELECT output_path, deleted_at FROM items WHERE id = ?", (item_id,)
-        ).fetchone()
-        assert row["output_path"] is None
-        assert row["deleted_at"] is not None  # ISO timestamp; format-checked elsewhere
-        # The format is the same isoformat _now_iso uses; loose-validate it starts with year.
-        assert row["deleted_at"][:4].isdigit()
-
-
-def test_record_item_clears_deleted_at_on_revive(tmp_path: Path) -> None:
-    """`pulp add <url>` on a deleted item must clear the tombstone, else we'd
-    have a row with both output_path AND deleted_at set - logically inconsistent."""
-    from pulpline.state import delete_item
-
-    db = tmp_path / "state.db"
-    f1 = tmp_path / "v1.epub"
-    f1.write_bytes(b"x")
-    with connect(db) as conn:
-        record_item(conn, _record(dedup="k1", path=str(f1)))
-        item_id = conn.execute("SELECT id FROM items WHERE dedup_key = ?", ("k1",)).fetchone()["id"]
-        delete_item(conn, item_id)
-
-        # Confirm the tombstone is set.
-        assert (
-            conn.execute("SELECT deleted_at FROM items WHERE id = ?", (item_id,)).fetchone()[
-                "deleted_at"
-            ]
-            is not None
-        )
-
-        # Re-ingest via the upsert path.
-        f2 = tmp_path / "v2.epub"
-        f2.write_bytes(b"y")
-        record_item(conn, _record(dedup="k1", path=str(f2)))
-
-        row = conn.execute(
-            "SELECT output_path, deleted_at FROM items WHERE id = ?", (item_id,)
-        ).fetchone()
-        assert row["output_path"] == str(f2)
-        assert row["deleted_at"] is None
-
-
-def test_activity_per_day_counts_added_and_deleted(tmp_path: Path) -> None:
-    from pulpline.state import activity_per_day, delete_item
-
-    db = tmp_path / "state.db"
-    with connect(db) as conn:
-        # Add three items today.
-        for k in ("k1", "k2", "k3"):
-            record_item(conn, _record(dedup=k, path=f"/tmp/{k}.epub"))
-        # Delete one today.
-        item_id = conn.execute("SELECT id FROM items WHERE dedup_key = 'k1'").fetchone()["id"]
-        delete_item(conn, item_id)
-
-        per_day = activity_per_day(conn, days=7)
-
-    assert len(per_day) == 7
-    _, added, deleted = per_day[0]
-    assert added == 3
-    assert deleted == 1
-    # Other days should be (0, 0)
-    for _, a, d in per_day[1:]:
-        assert (a, d) == (0, 0)
-
-
-def test_activity_per_day_preserves_added_count_after_delete(tmp_path: Path) -> None:
-    """Deleting an item should NOT retroactively shrink the 'added' count.
-
-    Otherwise a tidied-up library would look like nothing was ever ingested
-    on the days you cleaned up - the historical record should be stable.
-    """
-    from pulpline.state import activity_per_day, delete_item
-
-    db = tmp_path / "state.db"
-    with connect(db) as conn:
-        record_item(conn, _record(dedup="k1", path="/tmp/a.epub"))
-        record_item(conn, _record(dedup="k2", path="/tmp/b.epub"))
-
-        before = activity_per_day(conn, days=7)
-        added_before = before[0][1]
-
-        item_id = conn.execute("SELECT id FROM items WHERE dedup_key = 'k1'").fetchone()["id"]
-        delete_item(conn, item_id)
-
-        after = activity_per_day(conn, days=7)
-        added_after = after[0][1]
-
-    assert added_before == 2
-    assert added_after == 2  # unchanged - delete doesn't undo the add
-    assert after[0][2] == 1  # but it shows up as a delete
-
-
-def test_list_recently_deleted_excludes_live_items(tmp_path: Path) -> None:
-    from pulpline.state import delete_item, list_recently_deleted
-
-    db = tmp_path / "state.db"
-    with connect(db) as conn:
-        record_item(conn, _record(dedup="k1", path="/tmp/live.epub"))
-        record_item(conn, _record(dedup="k2", path="/tmp/dead.epub"))
-        dead_id = conn.execute("SELECT id FROM items WHERE dedup_key = 'k2'").fetchone()["id"]
-        delete_item(conn, dead_id)
-
-        deleted = list_recently_deleted(conn)
-
-    assert len(deleted) == 1
-    assert deleted[0].id == dead_id
-    assert deleted[0].output_path is None
-    assert deleted[0].deleted_at is not None
-
-
-def test_list_recently_deleted_legacy_null_timestamp_sorts_last(tmp_path: Path) -> None:
-    """An item soft-deleted before deleted_at shipped has NULL there; it
-    should still appear in the listing but sort after items with timestamps."""
-    from pulpline.state import list_recently_deleted
-
-    db = tmp_path / "state.db"
-    with connect(db) as conn:
-        # Two soft-deleted items via direct SQL (simulating legacy state where
-        # the column existed but wasn't being written). Today's-tombstone has
-        # deleted_at; the legacy one has NULL.
-        record_item(conn, _record(dedup="k1", path="/tmp/legacy.epub"))
-        record_item(conn, _record(dedup="k2", path="/tmp/today.epub"))
-        # Legacy: null out path AND deleted_at to mimic old behavior.
-        conn.execute(
-            "UPDATE items SET output_path = NULL, deleted_at = NULL WHERE dedup_key = 'k1'"
-        )
-        # Today: use the proper helper.
-        today_id = conn.execute("SELECT id FROM items WHERE dedup_key = 'k2'").fetchone()["id"]
-        from pulpline.state import delete_item
-
-        delete_item(conn, today_id)
-
-        deleted = list_recently_deleted(conn)
-
-    # Both appear; the one with deleted_at set comes first.
-    assert len(deleted) == 2
-    assert deleted[0].deleted_at is not None
-    assert deleted[1].deleted_at is None
+# ---- subscription state ----------------------------------------------------------
 
 
 def test_subscription_state_upsert(tmp_path: Path) -> None:
@@ -383,7 +404,6 @@ def test_subscription_state_upsert(tmp_path: Path) -> None:
         update_subscription_state(conn, "sub", "ok", None)
         state = get_subscription_state(conn, "sub")
         assert state is not None
-        assert state.name == "sub"
         assert state.last_status == "ok"
         assert state.last_error is None
 
@@ -392,3 +412,14 @@ def test_subscription_state_upsert(tmp_path: Path) -> None:
         assert state is not None
         assert state.last_status == "error"
         assert state.last_error == "boom"
+
+
+def test_subscription_state_preserves_total_items_when_none(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    with connect(db) as conn:
+        update_subscription_state(conn, "sub", "ok", None, total_items=42)
+        update_subscription_state(conn, "sub", "ok", None)  # no fresh total
+
+        state = get_subscription_state(conn, "sub")
+        assert state is not None
+        assert state.total_items == 42
