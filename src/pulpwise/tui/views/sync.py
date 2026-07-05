@@ -299,13 +299,18 @@ class SyncView(View):
         subs: tuple[Subscription, ...],
         states: dict[str, SubscriptionState | None],
     ) -> Text:
+        # Disabled subs never sync, so they get their own chip and stay out
+        # of the ok/error/pending math (and the in-flight denominator).
+        enabled = [s for s in subs if not s.disabled]
+        disabled = len(subs) - len(enabled)
+
         if self._run.in_flight:
             done = sum(1 for s in self._run.subs.values() if s.finished)
-            return Text.from_markup(f"[cyan]syncing... {done}/{len(subs)}[/]")
+            return Text.from_markup(f"[cyan]syncing... {done}/{len(enabled)}[/]")
 
-        ok = sum(1 for s in subs if _last_status(states.get(s.name)) == "ok")
-        err = sum(1 for s in subs if _last_status(states.get(s.name)) == "error")
-        pending = len(subs) - ok - err
+        ok = sum(1 for s in enabled if _last_status(states.get(s.name)) == "ok")
+        err = sum(1 for s in enabled if _last_status(states.get(s.name)) == "error")
+        pending = len(enabled) - ok - err
 
         parts: list[str] = []
         if ok:
@@ -314,9 +319,15 @@ class SyncView(View):
             parts.append(f"[red]{err} error[/]")
         if pending:
             parts.append(f"[dim]{pending} pending[/]")
+        if disabled:
+            parts.append(f"[dim]{disabled} disabled[/]")
         return Text.from_markup("  ·  ".join(parts) or "[dim]none[/]")
 
     def _row_marker(self, sub: Subscription, state: SubscriptionState | None) -> Text:
+        # Checked before run state: a stale run entry from before the user
+        # toggled the sub off must not override the paused marker.
+        if sub.disabled:
+            return Text("‖", style="dim")
         run = self._run.subs.get(sub.name)
         if run is not None:
             if not run.finished and self._run.in_flight:
@@ -336,6 +347,8 @@ class SyncView(View):
         return Text("·", style="dim")
 
     def _row_status(self, sub: Subscription, state: SubscriptionState | None) -> Text:
+        if sub.disabled:
+            return Text("disabled", style="dim")
         run = self._run.subs.get(sub.name)
         if run is not None:
             if not run.finished and self._run.in_flight:

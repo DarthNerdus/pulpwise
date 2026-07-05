@@ -14,6 +14,7 @@ from pulpwise.config import (
     load_config,
     remove_subscription,
     save_config,
+    set_subscription_disabled,
 )
 
 
@@ -153,6 +154,35 @@ def test_remove_subscription_returns_new_config_without_named() -> None:
     assert [s.name for s in config.subscriptions] == ["b"]
 
 
+def test_disabled_round_trips_and_defaults_false(tmp_path: Path) -> None:
+    target = tmp_path / "config.toml"
+    sub_on = Subscription(name="on", source="rss", url="https://on.example/feed")
+    sub_off = Subscription(name="off", source="rss", url="https://off.example/feed", disabled=True)
+    save_config(Config(subscriptions=(sub_on, sub_off)), target)
+
+    reloaded = load_config(target)
+    assert reloaded.find("on").disabled is False  # type: ignore[union-attr]
+    assert reloaded.find("off").disabled is True  # type: ignore[union-attr]
+    # Enabled subs don't get a noisy `disabled = false` line written out.
+    assert target.read_text().count("disabled") == 1
+
+
+def test_set_subscription_disabled_toggles_only_named() -> None:
+    config = Config()
+    config = add_subscription(config, Subscription(name="a", source="rss", url="x"))
+    config = add_subscription(config, Subscription(name="b", source="rss", url="y"))
+    config = set_subscription_disabled(config, "a", True)
+    assert config.find("a").disabled is True  # type: ignore[union-attr]
+    assert config.find("b").disabled is False  # type: ignore[union-attr]
+    config = set_subscription_disabled(config, "a", False)
+    assert config.find("a").disabled is False  # type: ignore[union-attr]
+
+
+def test_set_subscription_disabled_rejects_unknown_name() -> None:
+    with pytest.raises(ConfigError, match="no subscription"):
+        set_subscription_disabled(Config(), "missing", True)
+
+
 # ---- validation -----------------------------------------------------------------------
 
 
@@ -178,6 +208,16 @@ def test_load_rejects_duplicate_subscription_names(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(ConfigError, match="duplicate"):
+        load_config(target)
+
+
+def test_load_rejects_non_bool_disabled(tmp_path: Path) -> None:
+    target = tmp_path / "config.toml"
+    target.write_text(
+        '[[subscriptions]]\nname = "a"\nsource = "rss"\nurl = "y"\ndisabled = "yes"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="disabled must be a boolean"):
         load_config(target)
 
 

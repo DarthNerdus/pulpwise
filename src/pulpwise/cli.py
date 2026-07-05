@@ -23,6 +23,7 @@ from pulpwise.config import (
     load_config,
     remove_subscription,
     save_config,
+    set_subscription_disabled,
 )
 from pulpwise.importers import parse_selection
 from pulpwise.importers.opml import OpmlError, OpmlFeed, parse_opml
@@ -406,13 +407,20 @@ def _subscribe(
 
 @app.command()
 def sync() -> None:
-    """Re-run all subscriptions, push new items to Readwise Reader."""
+    """Re-run all enabled subscriptions, push new items to Readwise Reader."""
     config = load_config()
     if not config.subscriptions:
         typer.echo("no subscriptions configured. add one with `pulpwise add <feed-url>`.")
         return
 
-    typer.echo(f"syncing {len(config.subscriptions)} subscription(s)...")
+    enabled = [sub for sub in config.subscriptions if not sub.disabled]
+    if not enabled:
+        typer.echo("all subscriptions are disabled. nothing to sync.")
+        return
+
+    disabled_count = len(config.subscriptions) - len(enabled)
+    suffix = f" ({disabled_count} disabled)" if disabled_count else ""
+    typer.echo(f"syncing {len(enabled)} subscription(s)...{suffix}")
     try:
         with _CliProgress() as reporter:
             total = pipeline.sync(config=config, progress=reporter)
@@ -564,7 +572,7 @@ def list_(
             else:
                 last = state.last_synced_at
             status = state.last_status if state else None
-            sub_rows.append((sub.name, sub.source, sub.url, last, status))
+            sub_rows.append((sub.name, sub.source, sub.url, last, status, sub.disabled))
 
     if not sub_rows and not oneshots:
         typer.echo("nothing yet. add something with `pulpwise add <url>`.")
@@ -575,8 +583,10 @@ def list_(
         src_w = max(len("SOURCE"), max(len(r[1]) for r in sub_rows))
         typer.echo("SUBSCRIPTIONS")
         typer.echo(f"  {'NAME':<{name_w}}  {'SOURCE':<{src_w}}  URL")
-        for name, source, url, last, status in sub_rows:
+        for name, source, url, last, status, disabled in sub_rows:
             suffix = f"  ({status})" if status else ""
+            if disabled:
+                suffix += "  [disabled]"
             typer.echo(f"  {name:<{name_w}}  {source:<{src_w}}  {url}")
             typer.echo(f"  {'':<{name_w}}  {'':<{src_w}}  last sync: {last}{suffix}")
 
@@ -699,6 +709,36 @@ def remove(
         raise typer.Exit(code=1) from exc
     save_config(new_config)
     typer.echo(f"removed subscription {name!r}")
+
+
+@app.command()
+def disable(
+    name: str = typer.Argument(..., help="Subscription name to disable."),
+) -> None:
+    """Pause a subscription: keep it in config but skip it on sync."""
+    _set_disabled(name, disabled=True)
+
+
+@app.command()
+def enable(
+    name: str = typer.Argument(..., help="Subscription name to enable."),
+) -> None:
+    """Resume a paused subscription so sync picks it up again."""
+    _set_disabled(name, disabled=False)
+
+
+def _set_disabled(name: str, *, disabled: bool) -> None:
+    config = load_config()
+    sub = config.find(name)
+    if sub is None:
+        typer.echo(f"no subscription named {name!r}.", err=True)
+        raise typer.Exit(code=1)
+    verb = "disabled" if disabled else "enabled"
+    if sub.disabled == disabled:
+        typer.echo(f"{name!r} is already {verb}.")
+        return
+    save_config(set_subscription_disabled(config, name, disabled))
+    typer.echo(f"{verb} subscription {name!r}")
 
 
 def _source_name_for_url(url: str) -> str:

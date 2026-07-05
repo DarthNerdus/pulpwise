@@ -140,6 +140,33 @@ def test_sync_dedups_on_second_run(
     assert len(fake_readwise.save_payloads) == 2  # nothing was re-pushed
 
 
+def test_sync_skips_disabled_subscriptions(
+    mock_client_factory: ClientFactory,
+    fake_readwise: FakeReadwise,
+    readwise_sink: ReadwiseSink,
+) -> None:
+    """Disabled subs produce no discovery and no report - not even an error one.
+
+    The disabled sub's URL is absent from the mock transport, so any attempt
+    to sync it would surface as a feed-level error report.
+    """
+    config = Config(
+        subscriptions=(
+            Subscription(name="on", source="rss", url=FEED_URL),
+            Subscription(
+                name="off", source="rss", url="https://unreachable.example/feed", disabled=True
+            ),
+        )
+    )
+    client = mock_client_factory({FEED_URL: _feed()})
+
+    total = pipeline.sync(config=config, client=client, sink=readwise_sink)
+
+    assert [r.name for r in total.reports] == ["on"]
+    assert total.total_errors == 0
+    assert len(fake_readwise.save_payloads) == 2  # only the enabled feed's items
+
+
 def test_sync_applies_location_and_tags_options(
     mock_client_factory: ClientFactory,
     fake_readwise: FakeReadwise,

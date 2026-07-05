@@ -35,6 +35,7 @@ _DEFAULT_CONFIG_TEMPLATE = """# pulpwise config. Edit by hand, or via `pulpwise 
 # name = "stratechery"
 # source = "rss"
 # url = "https://stratechery.com/feed"
+# disabled = false               # true pauses the subscription without deleting it
 #
 # [subscriptions.options]
 # location = "feed"           # where saves land in Reader: new (alias: inbox) | later | archive | feed
@@ -56,6 +57,9 @@ class Subscription:
     # Readwise routing keys (`location`, `tags`). The core schema never
     # names source-specific keys - plugins own their shapes.
     options: dict[str, str | int] = field(default_factory=dict)
+    # Disabled subscriptions are kept in the config (name, URL, options
+    # intact) but skipped by `pipeline.sync`. Pausing, not deleting.
+    disabled: bool = False
 
     def option(self, key: str) -> str | int | None:
         """Read an option, returning None if unset. Convenience for source plugins."""
@@ -151,6 +155,16 @@ def remove_subscription(config: Config, name: str) -> Config:
     return replace(config, subscriptions=remaining)
 
 
+def set_subscription_disabled(config: Config, name: str, disabled: bool) -> Config:
+    """Return a new Config with the named subscription's disabled flag set."""
+    if config.find(name) is None:
+        raise ConfigError(f"no subscription named {name!r}")
+    updated = tuple(
+        replace(s, disabled=disabled) if s.name == name else s for s in config.subscriptions
+    )
+    return replace(config, subscriptions=updated)
+
+
 def _from_raw(raw: dict[str, object]) -> Config:
     # `paths` is a legacy pulpline table (output_dir for the file sink).
     # Tolerated so copied-over configs load; its contents are ignored.
@@ -223,6 +237,10 @@ def _sub_from_dict(raw: dict[str, object], index: int) -> Subscription:
     if output_dir is not None and not isinstance(output_dir, str):
         raise ConfigError(f"subscriptions[{index}].output_dir must be a string")
 
+    disabled = raw.get("disabled", False)
+    if not isinstance(disabled, bool):
+        raise ConfigError(f"subscriptions[{index}].disabled must be a boolean")
+
     options: dict[str, str | int] = {}
 
     nested = raw.get("options")
@@ -239,11 +257,14 @@ def _sub_from_dict(raw: dict[str, object], index: int) -> Subscription:
         source=raw["source"],  # type: ignore[arg-type]
         url=raw["url"],  # type: ignore[arg-type]
         options=options,
+        disabled=disabled,
     )
 
 
 def _sub_to_dict(sub: Subscription) -> dict[str, object]:
     out: dict[str, object] = {"name": sub.name, "source": sub.source, "url": sub.url}
+    if sub.disabled:
+        out["disabled"] = True
     if sub.options:
         out["options"] = dict(sub.options)
     return out

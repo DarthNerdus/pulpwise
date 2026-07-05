@@ -8,8 +8,9 @@ between 'you understand what happened' and 'you think it's broken'.
 
 from __future__ import annotations
 
+from pulpwise.config import Subscription
 from pulpwise.pipeline import BackfillReport
-from pulpwise.tui.views.subscriptions import _backfill_outcome_message
+from pulpwise.tui.views.subscriptions import _backfill_outcome_message, _sub_row_cells
 
 
 def _report(
@@ -77,3 +78,28 @@ def test_message_severity_is_warning_when_errors_present() -> None:
         "etymology", _report(new=2, skipped=10, errors=1, stopped="max_new")
     )
     assert sev == "warning"
+
+
+# ---- _sub_row_cells (table row rendering) ----------------------------------------
+
+
+def test_row_cells_disabled_sub_shows_disabled_status_and_dims() -> None:
+    sub = Subscription(name="paused", source="rss", url="https://p.example/feed", disabled=True)
+    cells = _sub_row_cells(sub, None, {"paused": 7})
+    assert cells[4] == "[dim]disabled[/dim]"  # Status column
+    assert all(cell.startswith("[dim]") for cell in cells)
+
+
+def test_row_cells_enabled_sub_is_not_dimmed() -> None:
+    sub = Subscription(name="live", source="rss", url="https://l.example/feed")
+    cells = _sub_row_cells(sub, None, {})
+    assert cells[4] == "-"  # no state yet
+    assert not any("[dim]" in cell for cell in cells)
+
+
+def test_row_cells_escape_hostile_markup_in_name_and_url() -> None:
+    """DataTable parses cells as markup; a bracket in a name must not crash the table."""
+    sub = Subscription(name="[red]evil", source="rss", url="https://x.example/[b]feed")
+    cells = _sub_row_cells(sub, None, {})
+    assert cells[0] == r"\[red]evil"
+    assert cells[5] == r"https://x.example/\[b]feed"

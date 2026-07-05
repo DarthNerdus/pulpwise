@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from pulpwise import __version__, cli, pipeline
 from pulpwise.cli import app
+from pulpwise.config import Config, Subscription, load_config, save_config
 from pulpwise.models import ExtractionError, FetchError
 from pulpwise.sinks.readwise import ReadwiseAuthError
 
@@ -269,3 +270,62 @@ def test_add_once_multi_item_url_suggests_subscribing(monkeypatch: pytest.Monkey
     assert "subscribe instead" in output
     assert not isinstance(result.exception, RuntimeError)  # no traceback abort
     assert "1 ok, 1 failed" in result.output
+
+
+# ---- enable / disable -------------------------------------------------------------
+
+
+def _seed_subscription(name: str = "mysub", *, disabled: bool = False) -> None:
+    save_config(
+        Config(
+            subscriptions=(
+                Subscription(
+                    name=name, source="rss", url="https://x.example/feed", disabled=disabled
+                ),
+            )
+        )
+    )
+
+
+def test_disable_pauses_subscription() -> None:
+    _seed_subscription()
+    result = runner.invoke(app, ["disable", "mysub"])
+    assert result.exit_code == 0
+    assert "disabled subscription 'mysub'" in result.output
+    assert load_config().find("mysub").disabled is True  # type: ignore[union-attr]
+
+
+def test_enable_resumes_subscription() -> None:
+    _seed_subscription(disabled=True)
+    result = runner.invoke(app, ["enable", "mysub"])
+    assert result.exit_code == 0
+    assert "enabled subscription 'mysub'" in result.output
+    assert load_config().find("mysub").disabled is False  # type: ignore[union-attr]
+
+
+def test_disable_is_idempotent_and_says_so() -> None:
+    _seed_subscription(disabled=True)
+    result = runner.invoke(app, ["disable", "mysub"])
+    assert result.exit_code == 0
+    assert "already disabled" in result.output
+
+
+def test_disable_unknown_name_fails() -> None:
+    result = runner.invoke(app, ["disable", "ghost"])
+    output = result.output + (result.stderr or "")
+    assert result.exit_code == 1
+    assert "no subscription named 'ghost'" in output
+
+
+def test_sync_reports_disabled_count_and_skips_all_disabled() -> None:
+    _seed_subscription(disabled=True)
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0
+    assert "all subscriptions are disabled" in result.output
+
+
+def test_list_marks_disabled_subscriptions() -> None:
+    _seed_subscription(disabled=True)
+    result = runner.invoke(app, ["list"])
+    assert result.exit_code == 0
+    assert "[disabled]" in result.output

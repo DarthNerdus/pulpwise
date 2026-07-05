@@ -300,7 +300,9 @@ def sync(
     progress: ProgressReporter | None = None,
     sink: ReadwiseSink | None = None,
 ) -> SyncTotal:
-    """Run all subscriptions; push any not-yet-seen items to Readwise.
+    """Run all enabled subscriptions; push any not-yet-seen items to Readwise.
+
+    Disabled subscriptions are skipped entirely - no discovery, no report.
 
     Errors at feed level (network, parse) and item level (fetch, push) are
     skip+log+continue per the spec; they end up in `SyncReport.error_messages`.
@@ -320,6 +322,9 @@ def sync(
     try:
         with connect(state_path) as conn:
             for sub in cfg.subscriptions:
+                if sub.disabled:
+                    _log.info("sync %s skipped (disabled)", sub.name)
+                    continue
                 reports.append(_sync_subscription(sub, cfg, conn, client, active_sink, progress))
     finally:
         if owns_sink:

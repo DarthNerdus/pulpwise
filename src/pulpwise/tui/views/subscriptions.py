@@ -19,6 +19,7 @@ from pulpwise.config import (
     load_config,
     remove_subscription,
     save_config,
+    set_subscription_disabled,
 )
 from pulpwise.state import (
     SubscriptionState,
@@ -125,6 +126,7 @@ class SubscriptionsView(View):
     BINDINGS = [  # noqa: RUF012
         ("d", "delete_selected", "Delete"),
         ("b", "backfill_selected", "Backfill"),
+        ("e", "toggle_disabled_selected", "Enable/Disable"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -156,23 +158,13 @@ class SubscriptionsView(View):
             detail.update("no subscriptions yet. `pulpwise add <url>` to get started.")
             return
 
+        cursor_row = table.cursor_row
         for sub in self._subs:
-            state = self._states.get(sub.name)
-            count = counts.get(sub.name, 0)
-            last_sync = (
-                _short_iso(state.last_synced_at) if state and state.last_synced_at else "never"
-            )
-            status = (state.last_status if state else None) or "-"
-            # Name and URL are user-derived; DataTable parses string cells as
-            # markup, so escape them or a bracket crashes the whole table.
-            table.add_row(
-                escape(sub.name),
-                sub.source,
-                str(count),
-                last_sync,
-                status,
-                escape(sub.url),
-            )
+            table.add_row(*_sub_row_cells(sub, self._states.get(sub.name), counts))
+        if cursor_row is not None and self._subs:
+            # Keep the cursor where it was (e.g. after toggling enable/disable)
+            # instead of snapping back to the first row on every refresh.
+            table.move_cursor(row=min(cursor_row, len(self._subs) - 1))
         detail.update("")
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -209,6 +201,22 @@ class SubscriptionsView(View):
         save_config(new_config)
         self.refresh_data()
         self.notify(f"removed {sub.name!r}", severity="information", markup=False)
+
+    def action_toggle_disabled_selected(self) -> None:
+        table = self.query_one(DataTable)
+        row = table.cursor_row
+        if row is None or row >= len(self._subs):
+            return
+        sub = self._subs[row]
+        config = load_config()
+        try:
+            new_config = set_subscription_disabled(config, sub.name, not sub.disabled)
+        except ConfigError:
+            return
+        save_config(new_config)
+        self.refresh_data()
+        verb = "disabled" if not sub.disabled else "enabled"
+        self.notify(f"{verb} {sub.name!r}", severity="information", markup=False)
 
     def action_backfill_selected(self) -> None:
         """Open a modal asking how many older posts to fetch, then run."""
@@ -266,6 +274,32 @@ class SubscriptionsView(View):
         )
         # Refresh DataTable in the UI thread so item-count column reflects the new arrivals.
         self.app.call_from_thread(self.refresh_data)
+
+
+def _sub_row_cells(
+    sub: Subscription, state: SubscriptionState | None, counts: dict[str, int]
+) -> tuple[str, str, str, str, str, str]:
+    """One DataTable row for a subscription.
+
+    Name and URL are user-derived; DataTable parses string cells as markup,
+    so escape them or a bracket crashes the whole table. Disabled rows show
+    'disabled' in the Status column and render dim so paused subscriptions
+    are visually distinct at a glance.
+    """
+    count = counts.get(sub.name, 0)
+    last_sync = _short_iso(state.last_synced_at) if state and state.last_synced_at else "never"
+    status = "disabled" if sub.disabled else (state.last_status if state else None) or "-"
+    cells = (
+        escape(sub.name),
+        sub.source,
+        str(count),
+        last_sync,
+        status,
+        escape(sub.url),
+    )
+    if sub.disabled:
+        return tuple(f"[dim]{cell}[/dim]" for cell in cells)  # type: ignore[return-value]
+    return cells
 
 
 def _backfill_outcome_message(sub_name: str, report: pipeline.BackfillReport) -> tuple[str, str]:
