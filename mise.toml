@@ -45,3 +45,7 @@ run = "make check"
 [tasks.build]
 description = "Build wheel + sdist into dist/"
 run = "make build"
+
+[tasks.install]
+description = "Build a fresh wheel and install the pulpwise CLI as a uv tool"
+run = "make install"

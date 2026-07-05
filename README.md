@@ -31,10 +31,9 @@ pipx install pulpwise
 Until then, build and install from source:
 
 ```bash
-git clone <repo>
+git clone https://github.com/DarthNerdus/pulpwise
 cd pulpwise
-make build
-uv tool install --force ./dist/pulpwise-*.whl
+make install       # builds a fresh wheel and installs it as a uv tool
 ```
 
 Requires Python 3.14+. macOS and Linux are first-class targets; Windows is unsupported.
@@ -535,11 +534,12 @@ make check         # ruff + mypy strict + pytest + coverage gate
 make test
 make typecheck
 make build         # wheel + sdist into dist/
+make install       # fresh build, then `uv tool install --force` the wheel
 ```
 
 [mise](https://mise.jdx.dev) users get the same targets as tasks: `mise
 install` provisions Python 3.14 + uv, then `mise run check` (or `sync`,
-`test`, `lint`, `format`, `typecheck`, `build`). Per-machine overrides go
+`test`, `lint`, `format`, `typecheck`, `build`, `install`). Per-machine overrides go
 in `mise.local.toml`, which is gitignored.
 
 Pulp Wise pins PyPI as its default index. If your shell exports a non-PyPI
