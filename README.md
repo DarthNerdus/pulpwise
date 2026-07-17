@@ -150,7 +150,9 @@ choice via `--location` (also defaulting to `feed`). Note that Reader
 silently falls back to your account default if you target a location
 you've disabled in your Reader settings - there's no error to catch.
 `tags` applies the listed Reader tags to every document the subscription
-pushes.
+pushes. The TUI presents the common destinations as **Feed**, **Inbox**
+(the API's `new` value), and **Later**; `archive` remains available through
+config and the CLI for compatibility.
 
 ## TUI
 
@@ -169,9 +171,12 @@ Four tabs:
   Readwise), `D` toggles a view of recently deleted items. Collapse state on the group nodes survives
   refreshes, so deleting an item doesn't blow open every group you'd
   closed.
-- **Subscriptions**: name / source / item count / last sync / status / URL,
-  with the last error surfaced for any failing feed. `d` removes the
-  highlighted subscription (config-only - documents already in Reader stay).
+- **Subscriptions**: name / source / destination / item count / last sync /
+  status / URL, with the last error surfaced for any failing feed. Press `l`
+  to choose Feed, Inbox, or Later for the highlighted subscription; the change
+  applies to sync/backfill jobs started after the save, not one already
+  running, and never moves documents already in Reader. `e` enables/disables,
+  `b` backfills, and `d` removes the highlighted subscription (config-only).
 - **Sync**: per-subscription pipeline status as one merged list. `s`
   (from any tab) kicks off a sync; rows morph from "last synced at"
   timestamps into live `12/16  Title` progress while a sub is running,
@@ -184,7 +189,8 @@ Four tabs:
   added/deleted activity bars.
 
 Switch tabs with the arrow keys on the tab bar (or the mouse); `s` runs a
-sync, `r` refreshes data, `q` quits. Adding
+sync, `r` refreshes data, `q` quits. In Subscriptions, `l` changes destination,
+`e` enables/disables, `b` backfills, and `d` removes. Adding
 a new view is one file in `src/pulpwise/tui/views/` plus an entry in
 `views/__init__.VIEWS`.
 
