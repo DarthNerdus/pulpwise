@@ -33,6 +33,7 @@ def _record(
     rw_id: str = "doc-1",
     rw_url: str = "https://read.readwise.io/read/doc-1",
     kind: str = "url",
+    destination: str = "readwise",
 ) -> ItemRecord:
     return ItemRecord(
         subscription_name=sub,
@@ -44,6 +45,7 @@ def _record(
         readwise_id=rw_id,
         readwise_url=rw_url,
         submission_kind=kind,
+        destination=destination,
     )
 
 
@@ -74,14 +76,25 @@ def test_record_item_upserts_on_duplicate_dedup_key(tmp_path: Path) -> None:
     db = tmp_path / "state.db"
     with connect(db) as conn:
         record_item(conn, _record(dedup="k1", rw_id="old", rw_url="https://r/old", kind="url"))
-        record_item(conn, _record(dedup="k1", rw_id="new", rw_url="https://r/new", kind="html"))
+        record_item(
+            conn,
+            _record(
+                dedup="k1",
+                rw_id="new",
+                rw_url="https://r/new",
+                kind="html",
+                destination="shiori",
+            ),
+        )
 
         rows = conn.execute(
-            "SELECT readwise_id, readwise_url, submission_kind FROM items WHERE dedup_key = 'k1'"
+            "SELECT readwise_id, readwise_url, submission_kind, destination "
+            "FROM items WHERE dedup_key = 'k1'"
         ).fetchall()
         assert len(rows) == 1
         assert rows[0]["readwise_id"] == "new"
         assert rows[0]["submission_kind"] == "html"
+        assert rows[0]["destination"] == "shiori"
         assert is_seen(conn, "k1") == "https://r/new"
 
 
@@ -228,7 +241,13 @@ def test_legacy_pulpline_db_migrates_in_place(tmp_path: Path) -> None:
 
     with connect(db) as conn:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(items)")}
-        assert {"readwise_id", "readwise_url", "submission_kind", "deleted_at"} <= columns
+        assert {
+            "readwise_id",
+            "readwise_url",
+            "submission_kind",
+            "destination",
+            "deleted_at",
+        } <= columns
         sub_columns = {row["name"] for row in conn.execute("PRAGMA table_info(subscription_state)")}
         assert "total_items" in sub_columns
 
@@ -236,10 +255,12 @@ def test_legacy_pulpline_db_migrates_in_place(tmp_path: Path) -> None:
         # with its ingested_at - the real deletion time was never recorded.
         dead = conn.execute("SELECT * FROM items WHERE dedup_key = 'dead-key'").fetchone()
         assert dead["deleted_at"] == "2025-02-01T10:00:00+00:00"
+        assert dead["destination"] == "readwise"
 
         # The live row stayed live.
         live = conn.execute("SELECT * FROM items WHERE dedup_key = 'live-key'").fetchone()
         assert live["deleted_at"] is None
+        assert live["destination"] == "readwise"
 
         # Sync must skip both; add must consider neither already-in-Reader.
         assert was_ingested(conn, "live-key") is True

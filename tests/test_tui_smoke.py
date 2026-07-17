@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from rich.text import Text
 
+from pulpwise.config import Config, Subscription, save_config
 from pulpwise.models import FetchError
 from pulpwise.state import LibraryItem
 from pulpwise.tui.app import PulpwiseApp
@@ -189,6 +190,34 @@ def test_probe_maps_fetch_error_to_could_not_verify(monkeypatch: pytest.MonkeyPa
     rendered = sync_view._readwise_text(status).plain
     assert "could not verify" in rendered
     assert "rejected" not in rendered
+
+
+def test_probe_skips_readwise_for_shiori_only_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    save_config(
+        Config(
+            subscriptions=(
+                Subscription(
+                    name="shiori-feed",
+                    source="rss",
+                    url="https://example.com/feed",
+                    options={"location": "shiori"},
+                ),
+            )
+        )
+    )
+
+    def unexpected_resolve(cfg: Config) -> str:
+        del cfg
+        raise AssertionError("Readwise token must not be resolved")
+
+    monkeypatch.setattr(sync_view, "resolve_token", unexpected_resolve)
+    status = sync_view._probe_readwise()
+
+    assert status.required is False
+    assert "not used" in sync_view._readwise_text(status).plain
+    assert "not configured" not in sync_view._readwise_text(status).plain
 
 
 def test_probe_never_raises_on_config_error() -> None:

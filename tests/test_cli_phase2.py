@@ -16,6 +16,7 @@ from pulpwise.cli import app
 from pulpwise.config import Config, ConfigError, Subscription, load_config
 from pulpwise.models import ExtractionError, FetchError, RateLimited
 from pulpwise.sinks.readwise import ReadwiseAuthError
+from pulpwise.sinks.shiori import ShioriAuthError
 from pulpwise.state import ItemRecord, connect, record_item
 from pulpwise.util.dedup import dedup_key
 
@@ -717,6 +718,7 @@ def test_add_rate_limited_autodetect_fails_cleanly_and_batch_continues(
         FetchError("archive page fetch failed: HTTP 500"),
         ExtractionError("empty body"),
         ConfigError("subscription 'alpha': options.location must be one of feed, later, new"),
+        ShioriAuthError("no Shiori API key configured; set [auth.shiori].token_path"),
     ],
 )
 def test_backfill_operational_errors_exit_cleanly(
@@ -742,20 +744,38 @@ def test_backfill_operational_errors_exit_cleanly(
     assert not isinstance(result.exception, (FetchError, ExtractionError, ConfigError))
 
 
-def test_sync_auth_error_exits_one_with_setup_hint(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A missing/rejected Readwise token fails the whole run loudly, exit 1."""
+@pytest.mark.parametrize(
+    ("auth_error", "hint"),
+    [
+        (
+            ReadwiseAuthError(
+                "no Readwise access token configured; get one at https://readwise.io/access_token"
+            ),
+            "readwise.io/access_token",
+        ),
+        (
+            ShioriAuthError("no Shiori API key configured; set [auth.shiori].token_path"),
+            "auth.shiori",
+        ),
+    ],
+)
+def test_sync_auth_error_exits_one_with_setup_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    auth_error: Exception,
+    hint: str,
+) -> None:
+    """A missing/rejected destination credential fails loudly with exit 1."""
     from pulpwise import pipeline
 
     config = Config(subscriptions=(Subscription(name="alpha", source="rss", url="https://a/feed"),))
     monkeypatch.setattr(cli, "load_config", lambda: config)
 
     def fake_sync(**kwargs: object) -> pipeline.SyncTotal:
-        raise ReadwiseAuthError(
-            "no Readwise access token configured; get one at https://readwise.io/access_token"
-        )
+        raise auth_error
 
     monkeypatch.setattr(pipeline, "sync", fake_sync)
 
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 1
-    assert "readwise.io/access_token" in (result.output + (result.stderr or ""))
+    assert hint in (result.output + (result.stderr or ""))
+    assert not isinstance(result.exception, (ReadwiseAuthError, ShioriAuthError))

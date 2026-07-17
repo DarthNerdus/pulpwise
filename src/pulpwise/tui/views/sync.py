@@ -75,6 +75,7 @@ class _ReadwiseStatus:
     is known.
     """
 
+    required: bool = True
     configured: bool | None = None
     hint: str = ""
     token_valid: bool | None = None
@@ -450,6 +451,9 @@ def _probe_readwise() -> _ReadwiseStatus:
         # A malformed config.toml must not escape the worker - an
         # unhandled exception there takes down the whole TUI.
         return _ReadwiseStatus(config_error=str(exc))
+    enabled = [sub for sub in cfg.subscriptions if not sub.disabled]
+    if enabled and all(sub.option("location") == "shiori" for sub in enabled):
+        return _ReadwiseStatus(required=False)
     try:
         resolve_token(cfg)
     except ReadwiseAuthError as exc:
@@ -476,6 +480,12 @@ def _readwise_text(status: _ReadwiseStatus) -> Text:
         text.append("  Token:  ")
         text.append("config error", style="red")
         text.append(f": {status.config_error}", style="dim")
+        text.append("\n")
+        return text
+
+    if not status.required:
+        text.append("  Token:  ")
+        text.append("not used by enabled subscriptions", style="dim")
         text.append("\n")
         return text
 

@@ -38,6 +38,7 @@ from pulpwise.sinks.readwise import (
     ReadwiseSink,
     canonical_location,
 )
+from pulpwise.sinks.shiori import ShioriAuthError
 from pulpwise.sources import REGISTRY as _SOURCE_REGISTRY
 from pulpwise.sources import pick_source_for_url
 from pulpwise.sources.rss import RSSSource
@@ -407,7 +408,7 @@ def _subscribe(
 
 @app.command()
 def sync() -> None:
-    """Re-run all enabled subscriptions, push new items to Readwise Reader."""
+    """Re-run all enabled subscriptions and route new items to their destinations."""
     config = load_config()
     if not config.subscriptions:
         typer.echo("no subscriptions configured. add one with `pulpwise add <feed-url>`.")
@@ -424,9 +425,9 @@ def sync() -> None:
     try:
         with _CliProgress() as reporter:
             total = pipeline.sync(config=config, progress=reporter)
-    except ReadwiseAuthError as exc:
-        # Raised before any discovery work when no token is configured or
-        # Readwise rejects it; the message carries the setup hint.
+    except (ReadwiseAuthError, ShioriAuthError) as exc:
+        # Raised before discovery when a required destination credential is
+        # missing, or on first use when a provider rejects it.
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
 
@@ -665,8 +666,8 @@ def backfill(
     except pipeline.BackfillUnsupported as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
-    except ReadwiseAuthError as exc:
-        # Subclass of FetchError; must be caught first.
+    except (ReadwiseAuthError, ShioriAuthError) as exc:
+        # Subclasses of FetchError; must be caught first.
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
     except (FetchError, ExtractionError, ConfigError) as exc:

@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/DarthNerdus/pulpwise/actions/workflows/ci.yml/badge.svg)](https://github.com/DarthNerdus/pulpwise/actions/workflows/ci.yml)
 
-Content pipeline whose only output is [Readwise Reader](https://readwise.io/read). Pulls articles, papers, and newsletters from RSS feeds, Substack (paid + free + your saved-for-later list), arXiv, an IMAP mailbox, and arbitrary URLs - filters and dedups them locally, then pushes each one into your Reader account via the Reader API. One reading queue, curated before anything reaches it.
+Content pipeline for [Readwise Reader](https://readwise.io/read) and [Shiori](https://www.shiori.sh/). Pulls articles, papers, and newsletters from RSS feeds, Substack (paid + free + your saved-for-later list), arXiv, an IMAP mailbox, and arbitrary URLs, then filters and dedups them locally before routing each subscription to its chosen destination.
 
-Pulp Wise is a fork of [pulpline](https://github.com/wtfnukee/pulpline) with the file pipeline removed. Where pulpline converts content to EPUB/PDF/CBZ and writes files you sync to an e-reader, Pulp Wise ends at `POST /api/v3/save/`. No output folder, no Syncthing, no rendering. Manga (MangaDex), books (Anna's Archive), and emailed ebook attachments remain mainline pulpline's job. The two tools coexist: separate package (`pulpwise`), commands (`pulpwise` / `pw`), config (`~/.config/pulpwise/`), state (`~/.local/share/pulpwise/`), and env vars (`PULPWISE_*`).
+Pulp Wise is a fork of [pulpline](https://github.com/wtfnukee/pulpline) with the file pipeline removed. Where pulpline converts content to EPUB/PDF/CBZ and writes files you sync to an e-reader, Pulp Wise ends at a reading-service API: Readwise's `/api/v3/save/` or Shiori's `/api/links`. No output folder, no Syncthing, no rendering. Manga (MangaDex), books (Anna's Archive), and emailed ebook attachments remain mainline pulpline's job. The two tools coexist: separate package (`pulpwise`), commands (`pulpwise` / `pw`), config (`~/.config/pulpwise/`), state (`~/.local/share/pulpwise/`), and env vars (`PULPWISE_*`).
 
 ## Status
 
@@ -38,9 +38,9 @@ make install       # builds a fresh wheel and installs it as a uv tool
 
 Requires Python 3.14+. macOS and Linux are first-class targets; Windows is unsupported.
 
-## Setup: the Readwise token
+## Setup: destination credentials
 
-Everything Pulp Wise does ends in a Reader API call, so the one required piece of setup is an access token. Get one at [readwise.io/access_token](https://readwise.io/access_token), then either put it in config:
+Readwise remains the default destination. Get an access token at [readwise.io/access_token](https://readwise.io/access_token), then either put it in config:
 
 ```toml
 # ~/.config/pulpwise/config.toml
@@ -61,6 +61,15 @@ token_path = "~/.config/pulpwise/readwise_token"
 ```
 
 The `PULPWISE_READWISE_TOKEN` environment variable wins over both - useful for keeping secrets out of files entirely.
+
+For subscriptions routed to Shiori, generate an API key under **Shiori Settings → API key** and configure it separately:
+
+```toml
+[auth.shiori]
+token_path = "~/.config/pulpwise/shiori_token"
+```
+
+Inline `token` is also accepted. `PULPWISE_SHIORI_TOKEN` wins over both config forms.
 
 ## Quick start
 
@@ -92,7 +101,7 @@ pulpwise remove simon-willison-s-weblog
 
 ### How a save happens
 
-Pulp Wise submits documents to Reader in one of two modes, chosen per item:
+For Readwise destinations, Pulp Wise submits documents in one of two modes, chosen per item:
 
 - **URL saves** for public content (RSS entries, arXiv PDFs, free Substack posts, plain web pages): the bare URL is submitted and Reader fetches + parses it server-side. Reader owns the extraction, which stays fixable on their end.
 - **HTML content submissions** for content Reader's fetcher can't reach (entitled paid Substack posts fetched with your session cookies, email newsletter bodies): Pulp Wise pushes the HTML itself, with explicit title/author/date and `should_clean_html` so Reader normalizes it. Emails without a web permalink get a deterministic synthetic URL (`https://pulpwise.invalid/<hash>`), since Reader requires a URL on every save.
@@ -100,6 +109,8 @@ Pulp Wise submits documents to Reader in one of two modes, chosen per item:
 Reader dedupes by exact URL: the save endpoint answers 201 for a new document and 200 when it already had that URL. Reader never re-parses saved content, so content submissions are effectively write-once - fixing a broken body means delete + re-save, which loses highlights.
 
 The save endpoint is rate-limited at 50 saves/minute per token. Pulp Wise paces itself at 45/minute and honors `Retry-After` on 429; if the limiter stays angry, the current subscription stops early and the remaining items defer to the next sync (nothing is lost - unpushed items aren't in the ledger yet).
+
+For a **Shiori** destination, Pulp Wise always sends exactly the discovered source URL to `POST https://www.shiori.sh/api/links`. It does not fetch the article body and never forwards HTML, titles, summaries, or Reader tags—even for sources that would fetch authenticated content for Readwise. Shiori performs its own background extraction. Items without a public HTTP(S) URL, such as email newsletters without a web permalink, are reported as errors instead of uploading content or saving a synthetic URL. Shiori link creation is paced below its 30/minute limit.
 
 ### Filtering a feed by category
 
@@ -133,26 +144,17 @@ Reader account.
 
 ### Choosing where saves land
 
-Two more per-subscription options control Reader-side routing:
+Per-subscription options choose the destination and, for Readwise, its routing:
 
 ```toml
 [subscriptions.options]
-location = "new"         # new | later | archive | feed (default: feed)
-tags = "tech, essays"    # comma-separated Reader tags
+location = "new"         # new | later | archive | feed (default) | shiori
+tags = "tech, essays"    # comma-separated Reader tags; ignored by Shiori
 ```
 
-`location` is where this subscription's saves land in Reader. **Unset, it
-defaults to `feed`** - Pulp Wise acts as a feed reader in front of Reader,
-so pushed items join the Feed section like native RSS instead of flooding
-your inbox; set `location = "new"` on the subscriptions whose picks you
-want in the triage flow. One-shot `pulpwise add <url>` takes the same
-choice via `--location` (also defaulting to `feed`). Note that Reader
-silently falls back to your account default if you target a location
-you've disabled in your Reader settings - there's no error to catch.
-`tags` applies the listed Reader tags to every document the subscription
-pushes. The TUI presents the common destinations as **Feed**, **Inbox**
-(the API's `new` value), and **Later**; `archive` remains available through
-config and the CLI for compatibility.
+`location` selects either a Readwise location or Shiori. **Unset, it defaults to `feed`** - Pulp Wise acts as a feed reader in front of Reader, so pushed items join the Feed section like native RSS instead of flooding your inbox. Set `location = "new"` for Reader's Inbox, or `location = "shiori"` to save each newly discovered public source URL to Shiori instead. A destination change applies to future sync/backfill work and never moves items already recorded in the local ledger.
+
+One-shot `pulpwise add <url>` remains Readwise-only and takes Reader locations through `--location`. Reader silently falls back to the account default if a targeted location is disabled. `tags` applies only to Readwise saves. The TUI presents **Feed**, **Inbox**, **Later**, and **Shiori**; `archive` remains config/CLI-only for compatibility.
 
 ## TUI
 
@@ -173,7 +175,7 @@ Four tabs:
   closed.
 - **Subscriptions**: name / source / destination / item count / last sync /
   status / URL, with the last error surfaced for any failing feed. Press `l`
-  to choose Feed, Inbox, or Later for the highlighted subscription; the change
+  to choose Feed, Inbox, Later, or Shiori for the highlighted subscription; the change
   applies to sync/backfill jobs started after the save, not one already
   running, and never moves documents already in Reader. `e` enables/disables,
   `b` backfills, and `d` removes the highlighted subscription (config-only).
@@ -450,9 +452,9 @@ API budget); re-running resumes where it left off via the dedup ledger.
 In the TUI Library view, `d` deletes the highlighted item:
 
 - The ledger row is kept but tombstoned (`deleted_at` set)
-- The Reader document is **not** touched - Pulp Wise is push-only and never
-  deletes from Readwise; remove the document in Reader yourself if you want
-  it gone there
+- The remote item is **not** touched - Pulp Wise is push-only and never
+  deletes from Readwise or Shiori; remove it in the destination yourself if
+  you want it gone there
 - The next `pulpwise sync` will *not* re-push the deleted article
 
 The tombstone is load-bearing: Reader's dedup only knows about documents
@@ -482,8 +484,8 @@ url = "https://badlogic-list.lakebed.app/rss"
 
 [subscriptions.options]
 categories = "Recommended Reading"
-location = "feed"
-tags = "links"
+location = "shiori"                      # or feed/new/later/archive for Readwise
+tags = "links"                           # ignored for Shiori
 ```
 
 There is no `[paths]` section and no `output_dir` anywhere - Pulp Wise
@@ -491,9 +493,9 @@ writes no files. Legacy pulpline keys are tolerated and ignored on load
 (so a copied-over config doesn't crash) and dropped on the next save.
 
 State (the dedup ledger and per-subscription run state) lives in
-`~/.local/share/pulpwise/state.db`. Each row records what was pushed
-(`readwise_id`, `readwise_url`, and whether it was a URL save or an HTML
-submission) plus the tombstones described above. A legacy pulpline
+`~/.local/share/pulpwise/state.db`. Each row records what was pushed, its `destination`, the remote ID/URL in legacy
+`readwise_id` / `readwise_url` columns, and whether it was a URL save or an HTML
+submission. A legacy pulpline
 `state.db` can be dropped in directly: the columns migrate in place, and
 items you already read as files are never re-pushed to Reader - any
 existing row counts as ingested.

@@ -67,6 +67,7 @@ def canonical_location(value: str) -> str:
     """
     return LOCATION_ALIASES.get(value, value)
 
+
 # Reader allows 50 saves/min per token; pace at 45/min so a long backfill
 # never trips the limiter in the first place.
 _SAVE_MIN_INTERVAL = 60.0 / 45.0

@@ -30,6 +30,10 @@ _DEFAULT_CONFIG_TEMPLATE = """# pulpwise config. Edit by hand, or via `pulpwise 
 # [auth.readwise]
 # token_path = "~/.config/pulpwise/readwise_token"
 
+# Optional Shiori API key for subscriptions routed to Shiori:
+# [auth.shiori]
+# token_path = "~/.config/pulpwise/shiori_token"
+
 # Example subscription (uncomment and edit):
 # [[subscriptions]]
 # name = "stratechery"
@@ -38,8 +42,8 @@ _DEFAULT_CONFIG_TEMPLATE = """# pulpwise config. Edit by hand, or via `pulpwise 
 # disabled = false               # true pauses the subscription without deleting it
 #
 # [subscriptions.options]
-# location = "feed"           # Reader location: new (inbox) | later | archive | feed
-# tags = "tech, essays"       # comma-separated Reader tags for this subscription
+# location = "feed"           # feed | new (inbox) | later | archive | shiori
+# tags = "tech, essays"       # Reader-only tags; ignored by Shiori
 """
 
 

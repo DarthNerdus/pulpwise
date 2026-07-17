@@ -92,6 +92,7 @@ def test_message_severity_is_warning_when_errors_present() -> None:
         ("new", "new", "Inbox"),
         ("inbox", "new", "Inbox"),
         ("later", "later", "Later"),
+        ("shiori", "shiori", "Shiori"),
         ("archive", None, "Archive (legacy)"),
         ("", None, "Invalid: ''"),
         (42, None, "Invalid: 42"),

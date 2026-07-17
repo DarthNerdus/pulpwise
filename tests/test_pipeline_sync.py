@@ -19,11 +19,12 @@ from pulpwise import pipeline
 from pulpwise.config import Config, Subscription
 from pulpwise.models import ItemRef, Paywalled, RawArticle
 from pulpwise.sinks.readwise import ReadwiseAuthError, ReadwiseSink
+from pulpwise.sinks.shiori import ShioriSink
 from pulpwise.sources import REGISTRY
 from pulpwise.sources.base import Source
 from pulpwise.state import connect, get_subscription_state, is_seen
 from pulpwise.util.dedup import dedup_key
-from tests.conftest import FIXTURES, FakeReadwise
+from tests.conftest import FIXTURES, FakeReadwise, FakeShiori
 
 ClientFactory = Callable[[dict[str, str]], httpx.Client]
 
@@ -65,7 +66,11 @@ class GatedSource(Source):
     fetch_needed: ClassVar[bool] = True
 
     def discover(self, target_url: str) -> Iterable[ItemRef]:
-        return [ItemRef(url=f"{target_url}/free"), ItemRef(url=f"{target_url}/paid")]
+        published = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+        return [
+            ItemRef(url=f"{target_url}/free", pub_date=published),
+            ItemRef(url=f"{target_url}/paid", pub_date=published),
+        ]
 
     def fetch(self, ref: ItemRef) -> RawArticle:
         if ref.url.endswith("/paid"):
@@ -94,6 +99,23 @@ class BackSource(Source):
 
     def fetch(self, ref: ItemRef) -> RawArticle:
         raise NotImplementedError
+
+
+class ShioriBackSource(Source):
+    """Fetch-needed backfill source; Shiori must never call fetch()."""
+
+    name: ClassVar[str] = "fake-shiori-back"
+    fetch_needed: ClassVar[bool] = True
+    refs: ClassVar[tuple[ItemRef, ...]] = ()
+
+    def discover(self, target_url: str) -> Iterable[ItemRef]:
+        return self.refs
+
+    def discover_backwards(self, target_url: str) -> Iterable[ItemRef]:
+        yield from self.refs
+
+    def fetch(self, ref: ItemRef) -> RawArticle:
+        raise AssertionError(f"Shiori must not fetch content for {ref.url}")
 
 
 # ---- sync -----------------------------------------------------------------------
@@ -197,6 +219,134 @@ def test_sync_maps_inbox_location_alias_to_new(
     assert fake_readwise.save_payloads  # sanity: something was pushed
     for payload in fake_readwise.save_payloads:
         assert payload["location"] == "new"
+
+
+def test_sync_routes_shiori_destination_as_url_only(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_shiori: FakeShiori,
+    shiori_sink: ShioriSink,
+) -> None:
+    monkeypatch.setitem(REGISTRY, "fake-gated", GatedSource)
+    config = Config(
+        subscriptions=(
+            Subscription(
+                name="pub",
+                source="fake-gated",
+                url="https://pub.example.com",
+                options={"location": "shiori", "tags": "must-not-leak"},
+            ),
+        )
+    )
+
+    total = pipeline.sync(config=config, sink=shiori_sink)
+
+    assert total.total_new == 2
+    assert fake_shiori.save_payloads == [
+        {"url": "https://pub.example.com/free"},
+        {"url": "https://pub.example.com/paid"},
+    ]
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT destination, readwise_id, readwise_url, submission_kind, pub_date "
+            "FROM items ORDER BY id"
+        ).fetchall()
+        assert {row["destination"] for row in rows} == {"shiori"}
+        assert {row["readwise_id"] for row in rows} == {"link-1", "link-2"}
+        assert {row["readwise_url"] for row in rows} == {
+            "https://pub.example.com/free",
+            "https://pub.example.com/paid",
+        }
+        assert {row["submission_kind"] for row in rows} == {"url"}
+        assert {row["pub_date"] for row in rows} == {"2026-07-17T12:00:00+00:00"}
+
+
+def test_shiori_only_sync_does_not_require_readwise_token(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_shiori: FakeShiori,
+    shiori_sink: ShioriSink,
+) -> None:
+    monkeypatch.setitem(REGISTRY, "fake-gated", GatedSource)
+    monkeypatch.setattr(
+        ShioriSink,
+        "from_config",
+        classmethod(lambda cls, cfg, client=None: shiori_sink),
+    )
+    config = Config(
+        subscriptions=(
+            Subscription(
+                name="pub",
+                source="fake-gated",
+                url="https://pub.example.com",
+                options={"location": "shiori"},
+            ),
+        )
+    )
+
+    total = pipeline.sync(config=config)
+
+    assert total.total_new == 2
+    assert fake_shiori.save_payloads == [
+        {"url": "https://pub.example.com/free"},
+        {"url": "https://pub.example.com/paid"},
+    ]
+
+
+def test_mixed_sync_builds_and_reuses_each_provider_sink(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_readwise: FakeReadwise,
+    readwise_sink: ReadwiseSink,
+    fake_shiori: FakeShiori,
+    shiori_sink: ShioriSink,
+) -> None:
+    monkeypatch.setitem(REGISTRY, "fake-static", StaticSource)
+    readwise_builds: list[Config] = []
+    shiori_builds: list[Config] = []
+
+    def build_readwise(cls: type[ReadwiseSink], cfg: Config) -> ReadwiseSink:
+        del cls
+        readwise_builds.append(cfg)
+        return readwise_sink
+
+    def build_shiori(cls: type[ShioriSink], cfg: Config) -> ShioriSink:
+        del cls
+        shiori_builds.append(cfg)
+        return shiori_sink
+
+    monkeypatch.setattr(ReadwiseSink, "from_config", classmethod(build_readwise))
+    monkeypatch.setattr(ShioriSink, "from_config", classmethod(build_shiori))
+    config = Config(
+        subscriptions=(
+            Subscription(name="reader-a", source="fake-static", url="https://reader-a.example"),
+            Subscription(name="reader-b", source="fake-static", url="https://reader-b.example"),
+            Subscription(
+                name="shiori-a",
+                source="fake-static",
+                url="https://shiori-a.example",
+                options={"location": "shiori"},
+            ),
+            Subscription(
+                name="shiori-b",
+                source="fake-static",
+                url="https://shiori-b.example",
+                options={"location": "shiori"},
+            ),
+        )
+    )
+
+    total = pipeline.sync(config=config)
+
+    assert total.total_new == 12
+    assert len(readwise_builds) == 1
+    assert len(shiori_builds) == 1
+    assert {str(payload["url"]).split("/")[2] for payload in fake_readwise.save_payloads} == {
+        "reader-a.example",
+        "reader-b.example",
+    }
+    assert {str(payload["url"]).split("/")[2] for payload in fake_shiori.save_payloads} == {
+        "shiori-a.example",
+        "shiori-b.example",
+    }
+    assert all(set(payload) == {"url"} for payload in fake_shiori.save_payloads)
 
 
 def test_sync_defaults_to_feed_location(
@@ -373,6 +523,37 @@ def _back_refs(n: int, year: int = 2026) -> tuple[ItemRef, ...]:
 
 def _back_sub() -> Subscription:
     return Subscription(name="pub", source="fake-back", url="https://pub.example.com")
+
+
+def test_shiori_backfill_saves_discovered_urls_without_fetching_content(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_shiori: FakeShiori,
+    shiori_sink: ShioriSink,
+) -> None:
+    refs = _back_refs(2)
+    monkeypatch.setattr(ShioriBackSource, "refs", refs)
+    source = ShioriBackSource(client=None)
+    sub = Subscription(
+        name="pub",
+        source="fake-shiori-back",
+        url="https://pub.example.com",
+        options={"location": "shiori"},
+    )
+
+    with connect() as conn:
+        report = pipeline._backfill_with_source(
+            sub,
+            conn,
+            source,
+            shiori_sink,
+            max_new=None,
+            since_iso=None,
+        )
+        destinations = {row["destination"] for row in conn.execute("SELECT destination FROM items")}
+
+    assert report.new_items == 2
+    assert fake_shiori.save_payloads == [{"url": ref.url} for ref in refs]
+    assert destinations == {"shiori"}
 
 
 def test_backfill_stops_at_max_new(

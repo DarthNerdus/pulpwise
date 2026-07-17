@@ -34,7 +34,12 @@ from pulpwise.state import (
 from pulpwise.tui.views.base import View
 
 _BACKFILL_DEFAULT_POSTS = 50
-_DESTINATION_CHOICES = (("feed", "Feed"), ("new", "Inbox"), ("later", "Later"))
+_DESTINATION_CHOICES = (
+    ("feed", "Feed"),
+    ("new", "Inbox"),
+    ("later", "Later"),
+    ("shiori", "Shiori"),
+)
 _DESTINATION_INDEX = {value: index for index, (value, _label) in enumerate(_DESTINATION_CHOICES)}
 _DESTINATION_LABELS = dict(_DESTINATION_CHOICES)
 

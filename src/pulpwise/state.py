@@ -2,13 +2,12 @@
 
 Schema lives here, not in TOML. TOML answers "what should pulpwise subscribe to?";
 SQLite answers "what has pulpwise already done?". The ledger is load-bearing in
-a way it wasn't when output was files on disk: Readwise dedupes saves by exact
-URL only *while the document exists* - once the user deletes a doc in Reader,
-re-submitting the URL would silently recreate it. The tombstone rows here are
-the only thing standing between a deleted article and its resurrection on the
-next sync. The ledger also keeps sync cheap: skipping an already-pushed item
-locally costs nothing, while "re-push and let Readwise dedup" costs one API
-call per item per run against a 50-saves/minute budget.
+a way it wasn't when output was files on disk: remote deduplication is not a
+substitute for remembering what the user already processed or deleted. The
+tombstone rows here prevent a deleted article from being resurrected on the
+next sync, and local skips avoid spending a destination API call per item.
+Legacy column names `readwise_id` / `readwise_url` now store the remote result
+for either destination; `destination` identifies which provider owns it.
 
 Liveness: an item row is live while `deleted_at IS NULL`. (The old pulpline
 schema encoded liveness as `output_path IS NOT NULL`; a migration below
@@ -48,6 +47,7 @@ CREATE TABLE IF NOT EXISTS items (
     readwise_id TEXT,
     readwise_url TEXT,
     submission_kind TEXT,
+    destination TEXT NOT NULL DEFAULT 'readwise',
     deleted_at TEXT
 );
 
@@ -72,6 +72,7 @@ _MIGRATIONS = [
     "ALTER TABLE items ADD COLUMN readwise_id TEXT",
     "ALTER TABLE items ADD COLUMN readwise_url TEXT",
     "ALTER TABLE items ADD COLUMN submission_kind TEXT",
+    "ALTER TABLE items ADD COLUMN destination TEXT NOT NULL DEFAULT 'readwise'",
     "UPDATE items SET deleted_at = ingested_at "
     "WHERE output_path IS NULL AND deleted_at IS NULL AND readwise_id IS NULL",
 ]
@@ -88,6 +89,7 @@ class ItemRecord:
     readwise_id: str
     readwise_url: str
     submission_kind: str  # 'url' | 'html'
+    destination: str = "readwise"
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,8 +183,9 @@ def record_item(conn: sqlite3.Connection, item: ItemRecord) -> None:
         """
         INSERT INTO items (
             subscription_name, source_url, dedup_key, canonical_url,
-            title, pub_date, ingested_at, readwise_id, readwise_url, submission_kind
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            title, pub_date, ingested_at, readwise_id, readwise_url,
+            submission_kind, destination
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(dedup_key) DO UPDATE SET
             subscription_name = excluded.subscription_name,
             source_url = excluded.source_url,
@@ -193,6 +196,7 @@ def record_item(conn: sqlite3.Connection, item: ItemRecord) -> None:
             readwise_id = excluded.readwise_id,
             readwise_url = excluded.readwise_url,
             submission_kind = excluded.submission_kind,
+            destination = excluded.destination,
             deleted_at = NULL
         """,
         (
@@ -206,6 +210,7 @@ def record_item(conn: sqlite3.Connection, item: ItemRecord) -> None:
             item.readwise_id,
             item.readwise_url,
             item.submission_kind,
+            item.destination,
         ),
     )
     conn.commit()

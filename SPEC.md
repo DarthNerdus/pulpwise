@@ -2,7 +2,7 @@
 
 ## 1. Context & Scope
 
-**Vision:** A content pipeline whose only sink is Readwise Reader. Pulls articles, papers, and newsletters from heterogeneous sources (RSS, Substack, arXiv, IMAP mailboxes, bare URLs), filters and dedups them locally, and pushes each one into the user's Reader account via the Reader API. Subscriptions, filtering rules, and ingestion history stay local and portable; the reading happens wherever Reader is.
+**Vision:** A local content pipeline for Readwise Reader and Shiori. It pulls articles, papers, and newsletters from heterogeneous sources (RSS, Substack, arXiv, IMAP mailboxes, bare URLs), filters and dedups them locally, then routes each subscription to its selected destination. Readwise can receive URLs or authenticated HTML captures; Shiori receives source URLs only. Subscriptions, filtering rules, and ingestion history stay local and portable.
 
 **Lineage:** forked from pulpline, which renders content to e-reader files (EPUB/PDF/CBZ) in a synced folder. Pulp Wise removes the entire file pipeline and replaces the sink. The two tools coexist deliberately: package `pulpwise`, CLI `pulpwise`/`pw`, config `~/.config/pulpwise/`, state `~/.local/share/pulpwise/`, env vars `PULPWISE_*` - nothing collides with a mainline pulpline install.
 
@@ -55,7 +55,8 @@ pulpwise/
     models.py              # ItemRef, RawArticle, ReaderSubmission, error types
     sources/               # in-tree registry: rss, url, substack (+saved), arxiv, email
     sinks/
-      readwise.py          # the only sink: POST /api/v3/save/
+      readwise.py          # URL/content saves: POST /api/v3/save/
+      shiori.py            # URL-only saves: POST /api/links
     importers/             # opml, substack bulk import
     tui/                   # textual app: Library / Subscriptions / Sync / Stats views
     util/                  # http (retry transport + breaker), dedup, email_clean, imap, logging
@@ -70,7 +71,7 @@ pulpwise/
 ### Pipeline shape
 
 ```
-Source.discover() -> ItemRef -> [dedup check] -> ReaderSubmission -> ReadwiseSink.push() -> ledger record -> Source.ack()
+Source.discover() -> ItemRef -> [dedup check] -> ReaderSubmission -> destination sink -> ledger record -> Source.ack()
 ```
 
 The ordering is the crash-safety contract: the remote push strictly precedes the ledger write (a lost ledger write means one harmless re-push next run - Reader answers 200 for a URL it already has), and the ledger write strictly precedes the ack (so a source never destroys its own re-discovery path - moving an email, say - before the item is durably owned). Acks also fire on ledger-skips so a crash between record and ack heals on the next sync.
@@ -87,7 +88,7 @@ The ordering is the crash-safety contract: the remote push strictly precedes the
 
 ### Readwise sink
 
-The only sink. `POST https://readwise.io/api/v3/save/` with `Authorization: Token XXX` (token from https://readwise.io/access_token; resolution order: `PULPWISE_READWISE_TOKEN` env > `[auth.readwise].token` > `[auth.readwise].token_path`). Verified against readwise.io/reader_api:
+The default sink. `POST https://readwise.io/api/v3/save/` with `Authorization: Token XXX` (token from https://readwise.io/access_token; resolution order: `PULPWISE_READWISE_TOKEN` env > `[auth.readwise].token` > `[auth.readwise].token_path`). Verified against readwise.io/reader_api:
 
 - **201** = document created; **200** = a document with that exact URL already existed (Reader bumps it, creates nothing). The status *is* the dedup signal - no pre-flight existence check.
 - URL saves send just the URL (plus optional title/date/category); content saves send `html` + `should_clean_html` + explicit metadata. `category = "pdf"` is sent for arXiv so Reader's type guesser doesn't have to work from a suffix-less URL.
@@ -95,11 +96,25 @@ The only sink. `POST https://readwise.io/api/v3/save/` with `Authorization: Toke
 - Reader never re-parses saved content: content submissions are write-once. Fixing content = delete + re-save, which loses highlights.
 - One sink instance per run (sync/backfill/one-shot) so the pacing clock and breaker span all subscriptions.
 
+### Shiori sink
+
+`options.location = "shiori"` routes a subscription to `POST https://www.shiori.sh/api/links` with `Authorization: Bearer XXX`. Key resolution is `PULPWISE_SHIORI_TOKEN` env > `[auth.shiori].token` > `[auth.shiori].token_path`.
+
+- The request body is exactly `{ "url": ref.url }`, using the discovered source URL. Pulp Wise does not fetch the article body for a Shiori route; HTML, title, author, summary, and Reader tags are never forwarded, including for authenticated/gated sources.
+- Only public HTTP(S) URLs are accepted. Synthetic `pulpwise.invalid` identities, non-web source IDs, credential-bearing URLs, localhost names, and non-global IP literals fail at item level rather than creating an unusable or unsafe Shiori entry.
+- A 200 JSON response with `success: true` and `linkId` is success; `duplicate: true` means Shiori already had the URL and bumped it.
+- Link creation is limited to 30/minute. The sink paces at 25/minute and converts 429 + `Retry-After` into the pipeline's normal rate-limited deferral, blocking later Shiori pushes during that cooldown.
+- Shiori does not document a stable per-link application URL, so the ledger opens the public source URL for Shiori-routed items.
+- Only providers used by enabled subscriptions are initialized for a run. A Shiori-only config does not require a Readwise token; mixed runs reuse one sink instance per provider.
+
 ### Config schema (`~/.config/pulpwise/config.toml`)
 ```toml
 [auth.readwise]
 token = "XXX"                                # or:
 token_path = "~/.config/pulpwise/readwise_token"
+
+[auth.shiori]
+token_path = "~/.config/pulpwise/shiori_token"
 
 [auth.substack]
 cookies_path = "~/.config/pulpwise/substack-cookies.json"
@@ -115,8 +130,8 @@ source = "rss"
 url = "https://stratechery.com/feed"
 
 [subscriptions.options]                 # values are str | int
-location = "new"                        # Reader routing (pipeline-owned): new | later | archive | feed; default feed
-tags = "tech, essays"                   # Reader tags (pipeline-owned)
+location = "new"                        # feed | new | later | archive | shiori; default feed
+tags = "tech, essays"                   # Reader-only tags; ignored by Shiori
 # categories / exclude_categories       # rss-owned
 # since_days / mark_read / ...          # email-owned; plugins own their shapes
 ```
@@ -148,7 +163,8 @@ CREATE TABLE items (
   ingested_at TEXT NOT NULL,
   readwise_id TEXT,                     -- Reader document id
   readwise_url TEXT,                    -- Reader app URL (what the TUI opens)
-  submission_kind TEXT,                 -- 'url' | 'html'; NULL for legacy file-era rows
+  submission_kind TEXT,                 -- 'url' | 'html'; Shiori always records 'url'
+  destination TEXT NOT NULL DEFAULT 'readwise',
   deleted_at TEXT                       -- tombstone; liveness = deleted_at IS NULL
 );
 
@@ -179,7 +195,7 @@ CREATE INDEX idx_items_subscription ON items(subscription_name);
 - [x] **`pulpwise remove <name>`** - removes a subscription from config (documents already in Reader stay).
 - [x] **`pulpwise backfill <name>`** - walks a subscription's archive backwards (Substack publications/saves, email folders), skipping already-pushed items, capped per run against the save budget; resumable via the ledger.
 - [x] **`pulpwise import opml <file>`** / **`pulpwise import substack [--auto]`** - bulk subscription importers, interactive checklist selection; `--auto` reconciles the Substack follow list non-interactively from cron.
-- [x] **`pulpwise tui`** - Library / Subscriptions / Sync / Stats. Subscriptions shows each effective Readwise destination and offers a Feed / Inbox / Later chooser; edits are persisted to `options.location` for later sync/backfill jobs.
+- [x] **`pulpwise tui`** - Library / Subscriptions / Sync / Stats. Subscriptions offers Feed / Inbox / Later / Shiori; edits are persisted to `options.location` for later sync/backfill jobs.
 
 Removed relative to pulpline: `mangadex`, `search` (Anna's Archive), `migrate` (`--rebuild` re-rendered files; there are no files, and Reader never re-parses content submissions anyway). No `--output-dir` flag anywhere.
 
@@ -196,7 +212,7 @@ None are commitments.
 ## 5. Current State
 
 - **Last Updated:** 2026-07-17
-- **Status:** Readwise refactor landed. Package renamed `pulpwise` (fork of pulpline v0.1.0); all file output, rendering, MangaDex, Anna's Archive, and email-attachment code removed. Sources shipped: rss (with category filtering), url, substack + substack-saved (cookie auth, HTML submissions for entitled paid posts), arxiv (PDF URL saves), email (newsletter content submissions). OPML + Substack importers, backfill, TUI (Library/Subscriptions/Sync/Stats, including destination management), durable file logging. GitHub Actions CI configured. Not yet published to PyPI.
+- **Status:** Readwise and Shiori destinations ship. Readwise accepts URL or HTML submissions; Shiori receives source URLs only. Package renamed `pulpwise` (fork of pulpline v0.1.0); all file output, rendering, MangaDex, Anna's Archive, and email-attachment code removed. Sources shipped: rss (with category filtering), url, substack + substack-saved, arxiv, email. OPML + Substack importers, backfill, TUI (Library/Subscriptions/Sync/Stats, including destination management), durable file logging. GitHub Actions CI configured. Not yet published to PyPI.
 - **Working directory:** `/Users/jread/Developer/pulpwise`
 
 ### Locked decisions (recorded so they don't get re-litigated)
@@ -222,7 +238,7 @@ New with the Readwise refactor:
 - **URL-vs-HTML routing is a property of the article, expressed as `RawArticle.content_gated`**: True when a third party (Reader's server-side fetcher, which carries no cookies) could not retrieve the content from its canonical URL. Gated → HTML content submission; ungated → bare URL save. Non-http(s) canonical URLs (email's `mid:` scheme) force the gated path. Sources set the flag; the routing lives once, in `Source.submission_for_article`.
 - **Synthetic URLs for URL-less content**: `https://pulpwise.invalid/<sha256(seed)[:32]>`, seeded from the item's own stable identity (e.g. the email's `mid:` dedup URL). Reader requires a URL on every save and uses it as the server-side dedup key, so the value must be deterministic across runs - a crash-retry of the same item has to hit the 200 duplicate path, not create a second document. `.invalid` is the RFC 2606 reserved TLD: it can never resolve, which is the point.
 - **Saves default to Reader's Feed section** (`DEFAULT_LOCATION = "feed"` in the pipeline). Pulp Wise acts as a feed reader in front of Reader, so pushed items behave like native RSS - Feed's Seen/Unseen flow - instead of flooding the inbox. Per-subscription `options.location` and `add --location` override; there is no "account default" pass-through anymore (that ambiguity is what the default replaces).
-- **The Subscriptions TUI exposes Feed, Inbox, and Later as destination choices.** Inbox is the user-facing label for canonical API/config value `new`; unset/feed displays as Feed, and manually authored `inbox` still displays as Inbox. Backend/config/CLI compatibility remains broader, so legacy `archive` is displayed but never silently rewritten. A saved TUI change applies only to sync/backfill jobs started afterward; running jobs keep their startup subscription snapshot, and existing Reader documents are never moved.
+- **The Subscriptions TUI exposes Feed, Inbox, Later, and Shiori as destination choices.** Inbox is the user-facing label for canonical Readwise value `new`; unset/feed displays as Feed, and manually authored `inbox` still displays as Inbox. Legacy `archive` is displayed but never silently rewritten. A saved change applies only to later sync/backfill jobs; running jobs keep their startup snapshot, and existing remote items are never moved.
 - **Pulp Wise is push-only: it never deletes (or otherwise mutates) documents in Readwise.** Removing a document is the user's call, made in Reader. Deleting in the TUI is a local tombstone only (row kept, `deleted_at` set). The tombstones are still the only guard against resurrecting user-deleted Reader documents - Reader's dedup lives only as long as the document does, so a re-submitted URL would be happily recreated; sync's skip check matches tombstoned rows to prevent exactly that. `add` clears a tombstone deliberately - that's the "actually I want it back" path.
 - **Substack follow-list reconciliation never runs implicitly.** `pulpwise import substack` (and `--auto` for cron) is the explicit path; the TUI's convenience pass before sync is gated behind `[auth.substack].auto_reconcile = true` and defaults OFF. Rationale: reconcile adds every followed publication missing from config - on a fresh config that's the user's entire follow list, a mass side effect that must not fall out of pressing `s`. (TOML booleans in `[auth.*]` are normalized to "true"/"false" strings by the loader so the flag can be written naturally.)
 - **Email messages with ebook attachments are skipped entirely** (mainline pulpline ingests those); newsletter title = Subject, author = sender.

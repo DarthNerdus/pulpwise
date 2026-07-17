@@ -73,6 +73,7 @@ def test_destination_modal_persists_inbox_and_preserves_options() -> None:
                 ("feed", "Feed"),
                 ("new", "Inbox"),
                 ("later", "Later"),
+                ("shiori", "Shiori"),
             ]
             await pilot.press("down", "enter")
             await pilot.pause()
@@ -287,6 +288,7 @@ def test_save_failure_keeps_existing_destination(monkeypatch: pytest.MonkeyPatch
     [
         ("new", ("up", "enter"), "feed"),
         (None, ("down", "down", "enter"), "later"),
+        (None, ("down", "down", "down", "enter"), "shiori"),
     ],
 )
 def test_destination_modal_persists_other_supported_choices(

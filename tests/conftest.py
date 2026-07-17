@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from pulpwise.sinks.readwise import ReadwiseSink
+from pulpwise.sinks.shiori import ShioriSink
 from pulpwise.util.http import reset_rate_limit_state
 from pulpwise.util.logging import LOGGER_NAME
 
@@ -114,6 +115,59 @@ def readwise_sink(fake_readwise: FakeReadwise, fake_timer: FakeTimer) -> Readwis
     return fake_readwise.sink(fake_timer)
 
 
+class FakeShiori:
+    """In-memory Shiori API that records the exact link-creation request."""
+
+    def __init__(self) -> None:
+        self.save_payloads: list[dict[str, object]] = []
+        self.save_auth_headers: list[str] = []
+        self.save_responses: list[httpx.Response] = []
+        self.documents: dict[str, str] = {}
+        self._counter = 0
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        if request.method != "POST" or request.url.path != "/api/links":
+            return httpx.Response(404, text=f"unmocked Shiori endpoint: {request.url}")
+        self.save_auth_headers.append(request.headers.get("Authorization", ""))
+        payload = json.loads(request.content.decode("utf-8"))
+        self.save_payloads.append(payload)
+        if self.save_responses:
+            return self.save_responses.pop(0)
+        url = str(payload["url"])
+        duplicate = url in self.documents
+        if not duplicate:
+            self._counter += 1
+            self.documents[url] = f"link-{self._counter}"
+        body: dict[str, object] = {"success": True, "linkId": self.documents[url]}
+        if duplicate:
+            body["duplicate"] = True
+        return httpx.Response(200, json=body)
+
+    def client(self) -> httpx.Client:
+        return httpx.Client(
+            base_url="https://www.shiori.sh",
+            transport=httpx.MockTransport(self.handler),
+        )
+
+    def sink(self, timer: FakeTimer, token: str = "test-token") -> ShioriSink:
+        return ShioriSink(
+            token,
+            client=self.client(),
+            sleep=timer.sleep,
+            clock=timer.clock,
+        )
+
+
+@pytest.fixture
+def fake_shiori() -> FakeShiori:
+    return FakeShiori()
+
+
+@pytest.fixture
+def shiori_sink(fake_shiori: FakeShiori, fake_timer: FakeTimer) -> ShioriSink:
+    return fake_shiori.sink(fake_timer)
+
+
 @pytest.fixture(autouse=True)
 def _fresh_rate_limit_state() -> None:
     """The retry transport keeps process-wide per-host cooldowns; forget them
@@ -158,6 +212,7 @@ def _isolated_pulpwise_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     # leak entries into the developer's real ~/.local/state/pulpwise/log/.
     monkeypatch.setenv("PULPWISE_LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.delenv("PULPWISE_READWISE_TOKEN", raising=False)
+    monkeypatch.delenv("PULPWISE_SHIORI_TOKEN", raising=False)
 
 
 @pytest.fixture

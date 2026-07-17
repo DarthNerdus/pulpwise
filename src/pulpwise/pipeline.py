@@ -1,13 +1,10 @@
-"""Pipeline orchestration: compose sources, the Readwise sink, dedup, state.
+"""Pipeline orchestration: compose sources, destination sinks, dedup, and state.
 
-Per-item flow: dedup check against the local ledger, then build a
-`ReaderSubmission` (with a fetch only for sources that need one), push it to
-Readwise, record the resulting document in the ledger, then ack the source.
-The ordering is the crash-safety contract: the remote push strictly precedes
-the ledger write (a lost ledger write means one harmless re-push next run -
-Readwise answers 200 for a URL it already has), and the ledger write strictly
-precedes the ack (so a source never destroys its own re-discovery path -
-moving an email, say - before the item is durably owned).
+Per-item flow: dedup against the local ledger, build provider input, push it,
+record the result, then ack the source. Readwise may fetch or receive content;
+Shiori receives the discovered URL without a content fetch. The ordering is
+the crash-safety contract: remote push strictly precedes ledger write, which
+strictly precedes source ack.
 """
 
 from __future__ import annotations
@@ -36,6 +33,7 @@ from pulpwise.sinks.readwise import (
     ReadwiseSink,
     canonical_location,
 )
+from pulpwise.sinks.shiori import ShioriAuthError, ShioriSink
 from pulpwise.sources import get_source, pick_source_for_url
 from pulpwise.sources.base import Source
 from pulpwise.state import (
@@ -58,6 +56,9 @@ _log = get_logger("pipeline")
 #: `pulpwise add --location`. (Reader silently falls back to the account
 #: default if the user has disabled the targeted location in settings.)
 DEFAULT_LOCATION = "feed"
+SHIORI_DESTINATION = "shiori"
+
+DestinationSink = ReadwiseSink | ShioriSink
 
 
 def _ack_item(source: Source, ref: ItemRef) -> None:
@@ -79,16 +80,18 @@ def _ack_item(source: Source, ref: ItemRef) -> None:
 
 
 def _build_submission(source: Source, ref: ItemRef) -> ReaderSubmission:
-    """Turn a discovered ref into what gets pushed to Readwise.
-
-    Sources that don't need a fetch (public URLs) map the ref directly;
-    everything else fetches first so the source can resolve URLs, check
-    entitlement, and capture gated content.
-    """
+    """Turn a discovered ref into what gets pushed to Readwise."""
     if not source.fetch_needed:
         return source.submission_for_ref(ref)
     article = source.fetch(ref)
     return source.submission_for_article(article)
+
+
+def _submission_for_destination(source: Source, ref: ItemRef, destination: str) -> ReaderSubmission:
+    """Build provider input without fetching content for URL-only Shiori."""
+    if destination == SHIORI_DESTINATION:
+        return ReaderSubmission(url=ref.url, pub_date=ref.pub_date)
+    return _build_submission(source, ref)
 
 
 def _already_ingested_as(
@@ -107,38 +110,81 @@ def _already_ingested_as(
     return submission_key != ref_key and was_ingested(conn, submission_key)
 
 
-def _push_options(sub: Subscription) -> tuple[str, tuple[str, ...]]:
-    """Parse the Readwise routing options off a subscription.
+@dataclass(frozen=True, slots=True)
+class PushOptions:
+    destination: str
+    location: str | None = None
+    tags: tuple[str, ...] = ()
 
-    `location` says where saves land in Reader (new/later/archive/feed;
-    "inbox" is accepted as an alias for "new", matching Reader's UI name),
-    defaulting to `DEFAULT_LOCATION` (the Feed section) when unset. `tags`
-    is a comma-separated list applied to every document this subscription
-    pushes. Raises ConfigError on junk so the subscription fails visibly
-    instead of pushing documents to the wrong place.
-    """
+
+def _push_options(sub: Subscription) -> PushOptions:
+    """Parse a subscription's destination and provider-specific routing."""
     location_raw = sub.option("location")
+    if location_raw == SHIORI_DESTINATION:
+        return PushOptions(destination=SHIORI_DESTINATION)
+
     location = DEFAULT_LOCATION
     if location_raw is not None:
         if isinstance(location_raw, str):
             location_raw = canonical_location(location_raw)
         if not isinstance(location_raw, str) or location_raw not in SAVE_LOCATIONS:
+            valid = ", ".join(sorted((*SAVE_LOCATIONS, SHIORI_DESTINATION)))
             raise ConfigError(
                 f"subscription {sub.name!r}: options.location must be one of "
-                f"{', '.join(sorted(SAVE_LOCATIONS))} (got {location_raw!r})"
+                f"{valid} (got {location_raw!r})"
             )
         location = location_raw
 
     tags_raw = sub.option("tags")
-    tags: tuple[str, ...] = ()
-    if tags_raw is not None:
-        if not isinstance(tags_raw, str):
-            raise ConfigError(
-                f"subscription {sub.name!r}: options.tags must be a comma-separated string"
-            )
-        tags = tuple(t.strip() for t in tags_raw.split(",") if t.strip())
+    if tags_raw is None:
+        tags: tuple[str, ...] = ()
+    elif isinstance(tags_raw, str):
+        tags = tuple(tag.strip() for tag in tags_raw.split(",") if tag.strip())
+    else:
+        raise ConfigError(
+            f"subscription {sub.name!r}: options.tags must be a comma-separated string"
+        )
+    return PushOptions(destination="readwise", location=location, tags=tags)
 
-    return location, tags
+
+class _SinkPool:
+    """Lazily build one sink per destination for the duration of a run."""
+
+    def __init__(self, cfg: Config, override: DestinationSink | None = None) -> None:
+        self._cfg = cfg
+        self._override = override
+        self._owned: dict[str, DestinationSink] = {}
+
+    def prepare(self, subscriptions: tuple[Subscription, ...]) -> None:
+        destinations: set[str] = set()
+        for sub in subscriptions:
+            if sub.disabled:
+                continue
+            try:
+                destinations.add(_push_options(sub).destination)
+            except ConfigError:
+                continue
+        for destination in destinations:
+            self.get(destination)
+
+    def get(self, destination: str) -> DestinationSink:
+        if self._override is not None:
+            return self._override
+        existing = self._owned.get(destination)
+        if existing is not None:
+            return existing
+        if destination == "readwise":
+            created: DestinationSink = ReadwiseSink.from_config(self._cfg)
+        elif destination == SHIORI_DESTINATION:
+            created = ShioriSink.from_config(self._cfg)
+        else:
+            raise ValueError(f"unknown destination {destination!r}")
+        self._owned[destination] = created
+        return created
+
+    def close(self) -> None:
+        for sink in self._owned.values():
+            sink.close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,9 +344,9 @@ def sync(
     state_path: Path | None = None,
     client: httpx.Client | None = None,
     progress: ProgressReporter | None = None,
-    sink: ReadwiseSink | None = None,
+    sink: DestinationSink | None = None,
 ) -> SyncTotal:
-    """Run all enabled subscriptions; push any not-yet-seen items to Readwise.
+    """Run enabled subscriptions and push unseen items to their destinations.
 
     Disabled subscriptions are skipped entirely - no discovery, no report.
 
@@ -312,23 +358,22 @@ def sync(
 
     `progress` is an optional reporter that receives subscription/item-level
     events as they happen. Pass None for silent operation (tests, scripts).
-    One sink instance is shared across the whole run so save pacing and the
-    rate-limit breaker span subscriptions.
+    One sink instance per used provider spans the run so pacing and
+    rate-limit cooldowns carry across subscriptions.
     """
     cfg = config or load_config()
     reports: list[SyncReport] = []
-    owns_sink = sink is None
-    active_sink = sink if sink is not None else ReadwiseSink.from_config(cfg)
+    sinks = _SinkPool(cfg, override=sink)
     try:
+        sinks.prepare(cfg.subscriptions)
         with connect(state_path) as conn:
             for sub in cfg.subscriptions:
                 if sub.disabled:
                     _log.info("sync %s skipped (disabled)", sub.name)
                     continue
-                reports.append(_sync_subscription(sub, cfg, conn, client, active_sink, progress))
+                reports.append(_sync_subscription(sub, cfg, conn, client, sinks, progress))
     finally:
-        if owns_sink:
-            active_sink.close()
+        sinks.close()
     return SyncTotal(reports=tuple(reports))
 
 
@@ -337,7 +382,7 @@ def _sync_subscription(
     cfg: Config,
     conn: sqlite3.Connection,
     client: httpx.Client | None,
-    sink: ReadwiseSink,
+    sinks: _SinkPool,
     progress: ProgressReporter | None,
 ) -> SyncReport:
     _log.info("sync %s starting (source=%s url=%s)", sub.name, sub.source, sub.url)
@@ -352,9 +397,11 @@ def _sync_subscription(
         return report
 
     try:
+        push_options = _push_options(sub)
+        sink = sinks.get(push_options.destination)
         with source_cls.from_config(cfg, client=client, subscription=sub) as source:
             report = _sync_with_source(sub, cfg, conn, source, sink, progress)
-    except ReadwiseAuthError as exc:
+    except (ReadwiseAuthError, ShioriAuthError) as exc:
         # A rejected token dooms every subscription identically - record the
         # failure and propagate so the run fails once, loudly (the sync()
         # docstring's contract), instead of logging one 401 per item.
@@ -384,10 +431,10 @@ def _sync_with_source(
     cfg: Config,
     conn: sqlite3.Connection,
     source: Source,
-    sink: ReadwiseSink,
+    sink: DestinationSink,
     progress: ProgressReporter | None,
 ) -> SyncReport:
-    location, tags = _push_options(sub)
+    push_options = _push_options(sub)
     refs = list(source.discover(sub.url))
     if progress is not None:
         progress.subscription_discovered(sub.name, len(refs))
@@ -413,7 +460,7 @@ def _sync_with_source(
         if progress is not None:
             progress.item_started(sub.name, ref.title or ref.url)
         try:
-            submission = _build_submission(source, ref)
+            submission = _submission_for_destination(source, ref, push_options.destination)
             if _already_ingested_as(conn, submission, key):
                 # The Reader-identity URL (arXiv pdf vs abs, email permalink
                 # vs mid:) was already ingested under a different discovery
@@ -423,7 +470,11 @@ def _sync_with_source(
                 if progress is not None:
                     progress.item_finished(sub.name, skipped=True)
                 continue
-            result = sink.push(submission, location=location, tags=tags)
+            result = sink.push(
+                submission,
+                location=push_options.location,
+                tags=push_options.tags,
+            )
             record_item(
                 conn,
                 ItemRecord(
@@ -436,6 +487,7 @@ def _sync_with_source(
                     readwise_id=result.document_id,
                     readwise_url=result.reader_url,
                     submission_kind=result.kind,
+                    destination=push_options.destination,
                 ),
             )
             new_items += 1
@@ -445,7 +497,7 @@ def _sync_with_source(
             skipped += 1
             # Ack so mark-read policies still apply to skipped mail.
             _ack_item(source, ref)
-        except ReadwiseAuthError:
+        except ReadwiseAuthError, ShioriAuthError:
             # Not an item problem - the token is bad and every remaining
             # push is doomed identically. Propagate (fail once, loudly).
             raise
@@ -518,12 +570,12 @@ def backfill(
     config: Config | None = None,
     state_path: Path | None = None,
     client: httpx.Client | None = None,
-    sink: ReadwiseSink | None = None,
+    sink: DestinationSink | None = None,
     *,
     max_new: int | None = 50,
     since_iso: str | None = None,
 ) -> BackfillReport:
-    """Walk a subscription's archive backwards, pushing older posts to Readwise.
+    """Walk a subscription's archive backwards, pushing older posts to its destination.
 
     Unlike `sync`, which only looks at the newest page, this paginates as
     deep as the source supports. Stop conditions:
@@ -549,8 +601,9 @@ def backfill(
     except ValueError as exc:
         raise BackfillUnsupported(str(exc)) from exc
 
-    owns_sink = sink is None
-    active_sink = sink if sink is not None else ReadwiseSink.from_config(cfg)
+    sinks = _SinkPool(cfg, override=sink)
+    push_options = _push_options(sub)
+    active_sink = sinks.get(push_options.destination)
     try:
         with (
             connect(state_path) as conn,
@@ -562,23 +615,27 @@ def backfill(
                     "(Substack and email sources do)"
                 )
             return _backfill_with_source(
-                sub, conn, source, active_sink, max_new=max_new, since_iso=since_iso
+                sub,
+                conn,
+                source,
+                active_sink,
+                max_new=max_new,
+                since_iso=since_iso,
             )
     finally:
-        if owns_sink:
-            active_sink.close()
+        sinks.close()
 
 
 def _backfill_with_source(
     sub: Subscription,
     conn: sqlite3.Connection,
     source: Source,
-    sink: ReadwiseSink,
+    sink: DestinationSink,
     *,
     max_new: int | None,
     since_iso: str | None,
 ) -> BackfillReport:
-    location, tags = _push_options(sub)
+    push_options = _push_options(sub)
 
     new_items = 0
     skipped = 0
@@ -624,12 +681,16 @@ def _backfill_with_source(
                 continue
 
             try:
-                submission = _build_submission(source, ref)
+                submission = _submission_for_destination(source, ref, push_options.destination)
                 if _already_ingested_as(conn, submission, key):
                     skipped += 1
                     _ack_item(source, ref)
                     continue
-                result = sink.push(submission, location=location, tags=tags)
+                result = sink.push(
+                    submission,
+                    location=push_options.location,
+                    tags=push_options.tags,
+                )
                 record_item(
                     conn,
                     ItemRecord(
@@ -642,6 +703,7 @@ def _backfill_with_source(
                         readwise_id=result.document_id,
                         readwise_url=result.reader_url,
                         submission_kind=result.kind,
+                        destination=push_options.destination,
                     ),
                 )
                 new_items += 1
@@ -652,7 +714,7 @@ def _backfill_with_source(
                 _ack_item(source, ref)
             except Paywalled as exc:
                 _log.info("backfill %s paywalled url=%s host=%s", sub.name, ref.url, exc.host)
-            except ReadwiseAuthError:
+            except ReadwiseAuthError, ShioriAuthError:
                 raise  # bad token dooms the whole walk; fail once, loudly
             except RateLimited:
                 raise  # must precede FetchError (subclass); handled by the outer except

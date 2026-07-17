@@ -192,7 +192,7 @@ class LibraryView(View):
         # tombstone is what matters - it stops sync from ever re-pushing.
         self.refresh_data()
         self.notify(
-            f"deleted {title!r} (document stays in Reader)",
+            f"deleted {title!r} locally (remote item was left alone)",
             severity="information",
             markup=False,
         )
