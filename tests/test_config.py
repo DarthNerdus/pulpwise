@@ -15,6 +15,7 @@ from pulpwise.config import (
     remove_subscription,
     save_config,
     set_subscription_disabled,
+    set_subscription_option,
 )
 
 
@@ -26,6 +27,15 @@ def test_load_creates_default_config_when_missing(tmp_path: Path) -> None:
     assert "auth.readwise" in text  # the template points at token setup
     assert config.subscriptions == ()
     assert config.auth == {}
+
+
+def test_load_can_require_existing_config(tmp_path: Path) -> None:
+    target = tmp_path / "missing.toml"
+
+    with pytest.raises(ConfigError, match="config file not found"):
+        load_config(target, create_if_missing=False)
+
+    assert not target.exists()
 
 
 def test_round_trip_preserves_subscriptions_and_options(tmp_path: Path) -> None:
@@ -181,6 +191,63 @@ def test_set_subscription_disabled_toggles_only_named() -> None:
 def test_set_subscription_disabled_rejects_unknown_name() -> None:
     with pytest.raises(ConfigError, match="no subscription"):
         set_subscription_disabled(Config(), "missing", True)
+
+
+def test_set_subscription_option_preserves_config_and_other_options() -> None:
+    first = Subscription(
+        name="first",
+        source="rss",
+        url="https://first.example/feed",
+        options={"location": "feed", "tags": "tech", "categories": "Essays"},
+        disabled=True,
+    )
+    second = Subscription(name="second", source="email", url="imaps://mail.example/Inbox")
+    config = Config(
+        auth={"readwise": {"token_path": "~/readwise-token"}},
+        subscriptions=(first, second),
+    )
+
+    updated = set_subscription_option(config, "first", "location", "new")
+
+    assert config.find("first") == first
+    assert updated.auth == config.auth
+    assert updated.subscriptions[1] == second
+    changed = updated.find("first")
+    assert changed is not None
+    assert changed.options == {
+        "location": "new",
+        "tags": "tech",
+        "categories": "Essays",
+    }
+    assert changed.disabled is True
+    assert changed.source == first.source
+    assert changed.url == first.url
+
+
+def test_set_subscription_option_rejects_unknown_name() -> None:
+    with pytest.raises(ConfigError, match="no subscription"):
+        set_subscription_option(Config(), "missing", "location", "later")
+
+
+@pytest.mark.parametrize("key,value", [("", "feed"), ("location", True)])
+def test_set_subscription_option_rejects_invalid_key_or_value(
+    key: str, value: str | int
+) -> None:
+    config = Config(subscriptions=(Subscription(name="a", source="rss", url="x"),))
+
+    with pytest.raises(ConfigError, match="option"):
+        set_subscription_option(config, "a", key, value)
+
+
+@pytest.mark.parametrize("location", ["feed", "new", "later"])
+def test_set_subscription_option_location_round_trips(tmp_path: Path, location: str) -> None:
+    target = tmp_path / "config.toml"
+    config = Config(subscriptions=(Subscription(name="a", source="rss", url="x"),))
+    updated = set_subscription_option(config, "a", "location", location)
+
+    save_config(updated, target)
+
+    assert load_config(target).find("a").options["location"] == location  # type: ignore[union-attr]
 
 
 # ---- validation -----------------------------------------------------------------------

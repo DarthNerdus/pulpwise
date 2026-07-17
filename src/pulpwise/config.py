@@ -38,7 +38,7 @@ _DEFAULT_CONFIG_TEMPLATE = """# pulpwise config. Edit by hand, or via `pulpwise 
 # disabled = false               # true pauses the subscription without deleting it
 #
 # [subscriptions.options]
-# location = "feed"           # where saves land in Reader: new (alias: inbox) | later | archive | feed
+# location = "feed"           # Reader location: new (inbox) | later | archive | feed
 # tags = "tech, essays"       # comma-separated Reader tags for this subscription
 """
 
@@ -106,10 +106,12 @@ def default_config_path() -> Path:
     return Path.home() / ".config" / "pulpwise" / "config.toml"
 
 
-def load_config(path: Path | None = None) -> Config:
-    """Load config from disk, creating it with defaults if absent."""
+def load_config(path: Path | None = None, *, create_if_missing: bool = True) -> Config:
+    """Load config from disk, optionally creating it with defaults if absent."""
     target = path or default_config_path()
     if not target.exists():
+        if not create_if_missing:
+            raise ConfigError(f"config file not found: {target}")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(_DEFAULT_CONFIG_TEMPLATE, encoding="utf-8")
         return Config()
@@ -163,6 +165,27 @@ def set_subscription_disabled(config: Config, name: str, disabled: bool) -> Conf
         replace(s, disabled=disabled) if s.name == name else s for s in config.subscriptions
     )
     return replace(config, subscriptions=updated)
+
+
+def set_subscription_option(
+    config: Config, name: str, key: str, value: str | int
+) -> Config:
+    """Return a new Config with one option changed on the named subscription."""
+    if config.find(name) is None:
+        raise ConfigError(f"no subscription named {name!r}")
+    if not key:
+        raise ConfigError("subscription option key must not be empty")
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ConfigError("subscription option value must be a string or int")
+
+    def with_option(sub: Subscription) -> Subscription:
+        if sub.name != name:
+            return sub
+        options = dict(sub.options)
+        options[key] = value
+        return replace(sub, options=options)
+
+    return replace(config, subscriptions=tuple(with_option(s) for s in config.subscriptions))
 
 
 def _from_raw(raw: dict[str, object]) -> Config:
