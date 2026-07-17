@@ -116,7 +116,14 @@ def load_config(path: Path | None = None, *, create_if_missing: bool = True) -> 
         target.write_text(_DEFAULT_CONFIG_TEMPLATE, encoding="utf-8")
         return Config()
 
-    raw = tomllib.loads(target.read_text(encoding="utf-8"))
+    try:
+        text = target.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"config file is not valid UTF-8: {target}") from exc
+    try:
+        raw = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"invalid TOML in config file {target}: {exc}") from exc
     return _from_raw(raw)
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from textual.notifications import Notify
 from textual.pilot import Pilot
 from textual.widgets import DataTable, OptionList, TabbedContent
 
+from pulpwise import pipeline
 from pulpwise.config import Config, Subscription, load_config, save_config
 from pulpwise.tui.app import PulpwiseApp
 from pulpwise.tui.views import SubscriptionsView
@@ -31,6 +33,15 @@ def _subscription(
         options=options,
         disabled=disabled,
     )
+
+
+def _message_hook(messages: list[str]) -> Callable[[object], None]:
+    def capture(message: object) -> None:
+        if isinstance(message, Notify):
+            notification = message.notification
+            messages.append(f"{notification.severity}:{notification.message}")
+
+    return capture
 
 
 async def _open_destination(app: PulpwiseApp, pilot: Pilot[None]) -> DestinationPromptScreen:
@@ -54,15 +65,29 @@ def test_destination_modal_persists_inbox_and_preserves_options() -> None:
         async with app.run_test(
             notifications=True,
             size=(120, 40),
-            message_hook=lambda message: (
-                messages.append(message.notification.message)
-                if isinstance(message, Notify)
-                else None
-            ),
+            message_hook=_message_hook(messages),
         ) as pilot:
-            await _open_destination(app, pilot)
+            screen = await _open_destination(app, pilot)
+            options = screen.query_one(OptionList)
+            assert [(option.id, str(option.prompt)) for option in options.options] == [
+                ("feed", "Feed"),
+                ("new", "Inbox"),
+                ("later", "Later"),
+            ]
             await pilot.press("down", "enter")
             await pilot.pause()
+            table = app.query_one("#subs-table", DataTable)
+            assert [str(column.label) for column in table.columns.values()] == [
+                "Name",
+                "Source",
+                "Destination",
+                "Items",
+                "Last Sync",
+                "Status",
+                "URL",
+            ]
+            assert table.get_row_at(0)[2] == "Inbox"
+            assert table.cursor_row == 0
 
     asyncio.run(scenario())
 
@@ -94,6 +119,21 @@ def test_unsupported_destination_has_no_default_and_enter_does_not_write(
     asyncio.run(scenario())
 
     assert target.read_bytes() == before
+
+
+def test_legacy_archive_can_be_explicitly_repaired() -> None:
+    save_config(Config(subscriptions=(_subscription(location="archive"),)))
+
+    async def scenario() -> None:
+        app = PulpwiseApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_destination(app, pilot)
+            await pilot.press("down", "enter")
+            await pilot.pause()
+
+    asyncio.run(scenario())
+
+    assert load_config().find("feed-one").option("location") == "feed"  # type: ignore[union-attr]
 
 
 def test_destination_save_uses_fresh_config_and_preserves_unrelated_edits() -> None:
@@ -131,10 +171,13 @@ def test_destination_save_uses_fresh_config_and_preserves_unrelated_edits() -> N
 
 def test_destination_conflict_preserves_external_location_change() -> None:
     save_config(Config(subscriptions=(_subscription(),)))
+    messages: list[str] = []
 
     async def scenario() -> None:
         app = PulpwiseApp()
-        async with app.run_test(size=(120, 40)) as pilot:
+        async with app.run_test(
+            notifications=True, size=(120, 40), message_hook=_message_hook(messages)
+        ) as pilot:
             await _open_destination(app, pilot)
             save_config(Config(subscriptions=(_subscription(location="later"),)))
             await pilot.press("down", "enter")
@@ -143,6 +186,8 @@ def test_destination_conflict_preserves_external_location_change() -> None:
     asyncio.run(scenario())
 
     assert load_config().find("feed-one").option("location") == "later"  # type: ignore[union-attr]
+    assert any(message.startswith("warning:") and "changed" in message for message in messages)
+    assert not any("future jobs" in message for message in messages)
 
 
 def test_fresh_equivalent_destination_is_a_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -167,13 +212,38 @@ def test_fresh_equivalent_destination_is_a_no_op(monkeypatch: pytest.MonkeyPatch
     assert load_config().find("feed-one").option("location") == "new"  # type: ignore[union-attr]
 
 
-def test_deleted_config_is_not_recreated_on_confirmation() -> None:
-    save_config(Config(subscriptions=(_subscription(),)))
-    target = Path(os.environ["PULPWISE_CONFIG_PATH"])
+@pytest.mark.parametrize("initial", [None, "feed", "inbox", "new"])
+def test_current_effective_destination_does_not_save(
+    initial: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save_config(Config(subscriptions=(_subscription(location=initial),)))
 
     async def scenario() -> None:
         app = PulpwiseApp()
         async with app.run_test(size=(120, 40)) as pilot:
+            await _open_destination(app, pilot)
+
+            def unexpected_save(config: Config, path: Path | None = None) -> None:
+                del config, path
+                raise AssertionError("current destination must not be rewritten")
+
+            monkeypatch.setattr(subscriptions_view, "save_config", unexpected_save)
+            await pilot.press("enter")
+            await pilot.pause()
+
+    asyncio.run(scenario())
+
+
+def test_deleted_config_is_not_recreated_on_confirmation() -> None:
+    save_config(Config(subscriptions=(_subscription(),)))
+    target = Path(os.environ["PULPWISE_CONFIG_PATH"])
+    messages: list[str] = []
+
+    async def scenario() -> None:
+        app = PulpwiseApp()
+        async with app.run_test(
+            notifications=True, size=(120, 40), message_hook=_message_hook(messages)
+        ) as pilot:
             await _open_destination(app, pilot)
             target.unlink()
             await pilot.press("down", "enter")
@@ -182,14 +252,19 @@ def test_deleted_config_is_not_recreated_on_confirmation() -> None:
     asyncio.run(scenario())
 
     assert not target.exists()
+    assert any(message.startswith("error:could not load config") for message in messages)
+    assert not any("future jobs" in message for message in messages)
 
 
 def test_save_failure_keeps_existing_destination(monkeypatch: pytest.MonkeyPatch) -> None:
     save_config(Config(subscriptions=(_subscription(),)))
+    messages: list[str] = []
 
     async def scenario() -> None:
         app = PulpwiseApp()
-        async with app.run_test(size=(120, 40)) as pilot:
+        async with app.run_test(
+            notifications=True, size=(120, 40), message_hook=_message_hook(messages)
+        ) as pilot:
             await _open_destination(app, pilot)
 
             def fail_save(config: Config, path: Path | None = None) -> None:
@@ -203,6 +278,8 @@ def test_save_failure_keeps_existing_destination(monkeypatch: pytest.MonkeyPatch
     asyncio.run(scenario())
 
     assert load_config().find("feed-one").option("location") is None  # type: ignore[union-attr]
+    assert any(message.startswith("error:could not save destination") for message in messages)
+    assert not any("future jobs" in message for message in messages)
 
 
 @pytest.mark.parametrize(
@@ -246,30 +323,45 @@ def test_destination_modal_escape_cancels_supported_choice() -> None:
     assert target.read_bytes() == before
 
 
-@pytest.mark.parametrize("malformed", ["[[subscriptions]\n", 'subscriptions = "bad"\n'])
-def test_malformed_config_is_preserved_on_confirmation(malformed: str) -> None:
+@pytest.mark.parametrize(
+    "malformed", ["[[subscriptions]\n", 'subscriptions = "bad"\n', b"\xff\xfe"]
+)
+def test_malformed_config_is_preserved_on_confirmation(malformed: str | bytes) -> None:
     save_config(Config(subscriptions=(_subscription(),)))
     target = Path(os.environ["PULPWISE_CONFIG_PATH"])
+    messages: list[str] = []
 
     async def scenario() -> None:
         app = PulpwiseApp()
-        async with app.run_test(size=(120, 40)) as pilot:
+        async with app.run_test(
+            notifications=True, size=(120, 40), message_hook=_message_hook(messages)
+        ) as pilot:
             await _open_destination(app, pilot)
-            target.write_text(malformed, encoding="utf-8")
+            if isinstance(malformed, bytes):
+                target.write_bytes(malformed)
+            else:
+                target.write_text(malformed, encoding="utf-8")
             await pilot.press("down", "enter")
             await pilot.pause()
 
     asyncio.run(scenario())
 
-    assert target.read_text(encoding="utf-8") == malformed
+    assert target.read_bytes() == (
+        malformed if isinstance(malformed, bytes) else malformed.encode("utf-8")
+    )
+    assert any(message.startswith("error:could not load config") for message in messages)
+    assert not any("future jobs" in message for message in messages)
 
 
 def test_changed_subscription_identity_is_not_mutated() -> None:
     save_config(Config(subscriptions=(_subscription(),)))
+    messages: list[str] = []
 
     async def scenario() -> None:
         app = PulpwiseApp()
-        async with app.run_test(size=(120, 40)) as pilot:
+        async with app.run_test(
+            notifications=True, size=(120, 40), message_hook=_message_hook(messages)
+        ) as pilot:
             await _open_destination(app, pilot)
             replacement = Subscription(
                 name="feed-one",
@@ -287,6 +379,8 @@ def test_changed_subscription_identity_is_not_mutated() -> None:
     assert replacement is not None
     assert replacement.url == "https://replacement.example/feed"
     assert replacement.option("location") is None
+    assert any(message.startswith("warning:") and "changed" in message for message in messages)
+    assert not any("future jobs" in message for message in messages)
 
 
 def test_refresh_failure_happens_after_destination_is_committed(
@@ -300,11 +394,7 @@ def test_refresh_failure_happens_after_destination_is_committed(
         async with app.run_test(
             notifications=True,
             size=(120, 40),
-            message_hook=lambda message: (
-                messages.append(message.notification.message)
-                if isinstance(message, Notify)
-                else None
-            ),
+            message_hook=_message_hook(messages),
         ) as pilot:
             await _open_destination(app, pilot)
             view = app.query_one(SubscriptionsView)
@@ -320,3 +410,124 @@ def test_refresh_failure_happens_after_destination_is_committed(
 
     assert load_config().find("feed-one").option("location") == "new"  # type: ignore[union-attr]
     assert any("saved, but display refresh failed" in message for message in messages)
+
+
+def test_backfill_after_refresh_failure_uses_persisted_destination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    save_config(Config(subscriptions=(_subscription(),)))
+    seen_locations: list[str | int | None] = []
+
+    async def scenario() -> None:
+        app = PulpwiseApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_destination(app, pilot)
+            view = app.query_one(SubscriptionsView)
+            original_refresh = view.refresh_data
+
+            def fail_refresh() -> None:
+                raise RuntimeError("state unavailable")
+
+            monkeypatch.setattr(view, "refresh_data", fail_refresh)
+            await pilot.press("down", "enter")
+            await pilot.pause()
+            monkeypatch.setattr(view, "refresh_data", original_refresh)
+
+            def fake_backfill(
+                sub: Subscription, *args: object, **kwargs: object
+            ) -> pipeline.BackfillReport:
+                del args
+                assert isinstance(kwargs.get("config"), Config)
+                seen_locations.append(sub.option("location"))
+                return pipeline.BackfillReport(
+                    name=sub.name,
+                    new_items=0,
+                    skipped_already_ingested=0,
+                    errors=0,
+                    pages_walked=1,
+                    stopped_reason="exhausted",
+                )
+
+            monkeypatch.setattr(pipeline, "backfill", fake_backfill)
+            app.query_one("#subs-table", DataTable).focus()
+            await pilot.press("b")
+            await pilot.pause()
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+    asyncio.run(scenario())
+
+    assert seen_locations == ["new"]
+
+
+def test_superseding_destination_edit_suppresses_false_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    save_config(Config(subscriptions=(_subscription(),)))
+    messages: list[str] = []
+
+    async def scenario() -> None:
+        app = PulpwiseApp()
+        async with app.run_test(
+            notifications=True, size=(120, 40), message_hook=_message_hook(messages)
+        ) as pilot:
+            await _open_destination(app, pilot)
+            view = app.query_one(SubscriptionsView)
+            original_refresh = view.refresh_data
+
+            def superseding_refresh() -> None:
+                save_config(Config(subscriptions=(_subscription(location="later"),)))
+                original_refresh()
+
+            monkeypatch.setattr(view, "refresh_data", superseding_refresh)
+            await pilot.press("down", "enter")
+            await pilot.pause()
+            assert app.query_one("#subs-table", DataTable).get_row_at(0)[2] == "Later"
+
+    asyncio.run(scenario())
+
+    assert load_config().find("feed-one").option("location") == "later"  # type: ignore[union-attr]
+    assert any(message.startswith("warning:") and "superseded" in message for message in messages)
+    assert not any("→ Inbox for future jobs" in message for message in messages)
+
+
+def test_removed_subscription_is_not_recreated() -> None:
+    save_config(Config(subscriptions=(_subscription(),)))
+    messages: list[str] = []
+
+    async def scenario() -> None:
+        app = PulpwiseApp()
+        async with app.run_test(
+            notifications=True, size=(120, 40), message_hook=_message_hook(messages)
+        ) as pilot:
+            await _open_destination(app, pilot)
+            save_config(Config())
+            await pilot.press("down", "enter")
+            await pilot.pause()
+
+    asyncio.run(scenario())
+
+    assert load_config().find("feed-one") is None
+    assert any(message.startswith("warning:") and "changed" in message for message in messages)
+    assert not any("future jobs" in message for message in messages)
+
+
+def test_destination_binding_with_empty_table_is_a_no_op() -> None:
+    save_config(Config())
+    target = Path(os.environ["PULPWISE_CONFIG_PATH"])
+    before = target.read_bytes()
+
+    async def scenario() -> None:
+        app = PulpwiseApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.query_one(TabbedContent).active = SubscriptionsView.ID
+            await pilot.pause()
+            app.query_one("#subs-table", DataTable).focus()
+            await pilot.press("l")
+            await pilot.pause()
+            assert not isinstance(app.screen, DestinationPromptScreen)
+
+    asyncio.run(scenario())
+
+    assert target.read_bytes() == before

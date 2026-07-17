@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tomllib
 from typing import ClassVar
 
 from rich.markup import escape
@@ -10,6 +9,7 @@ from textual import work
 from textual.app import ComposeResult
 from textual.binding import BindingType
 from textual.containers import Vertical
+from textual.notifications import SeverityLevel
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
@@ -24,6 +24,7 @@ from pulpwise.config import (
     set_subscription_disabled,
     set_subscription_option,
 )
+from pulpwise.sinks.readwise import canonical_location
 from pulpwise.state import (
     SubscriptionState,
     connect,
@@ -41,12 +42,11 @@ _DESTINATION_LABELS = dict(_DESTINATION_CHOICES)
 def _canonical_destination(raw: str | int | None) -> str | None:
     """Return the TUI-supported canonical value, or None for legacy/invalid input."""
     if raw is None:
-        return "feed"
-    if raw == "inbox":
-        return "new"
-    if isinstance(raw, str) and raw in _DESTINATION_LABELS:
-        return raw
-    return None
+        raw = pipeline.DEFAULT_LOCATION
+    if not isinstance(raw, str):
+        return None
+    canonical = canonical_location(raw)
+    return canonical if canonical in _DESTINATION_LABELS else None
 
 
 def _destination_label(raw: str | int | None) -> str:
@@ -329,32 +329,29 @@ class SubscriptionsView(View):
     def _save_destination(self, snapshot: Subscription, destination: str) -> None:
         try:
             config = load_config(create_if_missing=False)
-        except (ConfigError, OSError, tomllib.TOMLDecodeError) as exc:
+        except (ConfigError, OSError) as exc:
             self.notify(f"could not load config: {exc}", severity="error", markup=False)
             return
 
         current = config.find(snapshot.name)
         if current is None or (current.source, current.url) != (snapshot.source, snapshot.url):
-            self.notify(
+            self._refresh_then_notify(
                 f"subscription {snapshot.name!r} changed; reopen Destination",
                 severity="warning",
-                markup=False,
             )
             return
 
         current_raw = current.option("location")
         if _canonical_destination(current_raw) == destination:
-            self.notify(
+            self._refresh_then_notify(
                 f"{snapshot.name!r} already routes to {_DESTINATION_LABELS[destination]}",
                 severity="information",
-                markup=False,
             )
             return
         if current_raw != snapshot.option("location"):
-            self.notify(
+            self._refresh_then_notify(
                 f"destination for {snapshot.name!r} changed; reopen Destination",
                 severity="warning",
-                markup=False,
             )
             return
 
@@ -367,6 +364,18 @@ class SubscriptionsView(View):
 
         self._finish_destination_save(snapshot.name, destination)
 
+    def _refresh_then_notify(self, message: str, *, severity: SeverityLevel) -> None:
+        try:
+            self.refresh_data()
+        except Exception as exc:
+            self.notify(
+                f"{message}; display refresh failed: {type(exc).__name__}: {exc}",
+                severity="error",
+                markup=False,
+            )
+            return
+        self.notify(message, severity=severity, markup=False)
+
     def _finish_destination_save(self, sub_name: str, destination: str) -> None:
         try:
             self.refresh_data()
@@ -374,6 +383,18 @@ class SubscriptionsView(View):
             self.notify(
                 f"destination saved, but display refresh failed: {type(exc).__name__}: {exc}",
                 severity="error",
+                markup=False,
+            )
+            return
+
+        current = next((sub for sub in self._subs if sub.name == sub_name), None)
+        if current is None or _canonical_destination(current.option("location")) != destination:
+            current_label = (
+                "missing" if current is None else _destination_label(current.option("location"))
+            )
+            self.notify(
+                f"destination save was superseded; {sub_name!r} is now {current_label}",
+                severity="warning",
                 markup=False,
             )
             return
@@ -409,7 +430,11 @@ class SubscriptionsView(View):
     def _do_backfill(self, sub: Subscription, max_new: int | None) -> None:
         """Runs in a worker thread - backfill is network-bound and can take a while."""
         try:
-            report = pipeline.backfill(sub, max_new=max_new)
+            config = load_config(create_if_missing=False)
+            current = config.find(sub.name)
+            if current is None or (current.source, current.url) != (sub.source, sub.url):
+                raise ConfigError(f"subscription {sub.name!r} changed; reopen Backfill")
+            report = pipeline.backfill(current, config=config, max_new=max_new)
         except pipeline.BackfillUnsupported as exc:
             self.app.call_from_thread(
                 self.app.notify,

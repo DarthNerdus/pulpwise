@@ -1,7 +1,7 @@
 ---
 title: "refactor: Manage feed destinations in the TUI"
 type: refactor
-status: active
+status: completed
 date: 2026-07-17
 ---
 

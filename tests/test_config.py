@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -229,12 +230,14 @@ def test_set_subscription_option_rejects_unknown_name() -> None:
         set_subscription_option(Config(), "missing", "location", "later")
 
 
-@pytest.mark.parametrize("key,value", [("", "feed"), ("location", True)])
-def test_set_subscription_option_rejects_invalid_key_or_value(key: str, value: str | int) -> None:
+@pytest.mark.parametrize(
+    "key,value", [("", "feed"), ("location", True), ("location", 1.5), ("location", [])]
+)
+def test_set_subscription_option_rejects_invalid_key_or_value(key: str, value: object) -> None:
     config = Config(subscriptions=(Subscription(name="a", source="rss", url="x"),))
 
     with pytest.raises(ConfigError, match="option"):
-        set_subscription_option(config, "a", key, value)
+        set_subscription_option(config, "a", key, cast(str | int, value))
 
 
 @pytest.mark.parametrize("location", ["feed", "new", "later"])
@@ -249,6 +252,21 @@ def test_set_subscription_option_location_round_trips(tmp_path: Path, location: 
 
 
 # ---- validation -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("content", "match"),
+    [("[[subscriptions]\n", "invalid TOML"), (b"\xff\xfe", "not valid UTF-8")],
+)
+def test_load_normalizes_parse_errors(tmp_path: Path, content: str | bytes, match: str) -> None:
+    target = tmp_path / "config.toml"
+    if isinstance(content, bytes):
+        target.write_bytes(content)
+    else:
+        target.write_text(content, encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=match):
+        load_config(target)
 
 
 def test_load_rejects_missing_required_field(tmp_path: Path) -> None:
