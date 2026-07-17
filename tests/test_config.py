@@ -230,9 +230,7 @@ def test_set_subscription_option_rejects_unknown_name() -> None:
 
 
 @pytest.mark.parametrize("key,value", [("", "feed"), ("location", True)])
-def test_set_subscription_option_rejects_invalid_key_or_value(
-    key: str, value: str | int
-) -> None:
+def test_set_subscription_option_rejects_invalid_key_or_value(key: str, value: str | int) -> None:
     config = Config(subscriptions=(Subscription(name="a", source="rss", url="x"),))
 
     with pytest.raises(ConfigError, match="option"):

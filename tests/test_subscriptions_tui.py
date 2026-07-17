@@ -54,9 +54,11 @@ def test_destination_modal_persists_inbox_and_preserves_options() -> None:
         async with app.run_test(
             notifications=True,
             size=(120, 40),
-            message_hook=lambda message: messages.append(message.notification.message)
-            if isinstance(message, Notify)
-            else None,
+            message_hook=lambda message: (
+                messages.append(message.notification.message)
+                if isinstance(message, Notify)
+                else None
+            ),
         ) as pilot:
             await _open_destination(app, pilot)
             await pilot.press("down", "enter")
@@ -298,9 +300,11 @@ def test_refresh_failure_happens_after_destination_is_committed(
         async with app.run_test(
             notifications=True,
             size=(120, 40),
-            message_hook=lambda message: messages.append(message.notification.message)
-            if isinstance(message, Notify)
-            else None,
+            message_hook=lambda message: (
+                messages.append(message.notification.message)
+                if isinstance(message, Notify)
+                else None
+            ),
         ) as pilot:
             await _open_destination(app, pilot)
             view = app.query_one(SubscriptionsView)

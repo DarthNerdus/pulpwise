@@ -167,9 +167,7 @@ def set_subscription_disabled(config: Config, name: str, disabled: bool) -> Conf
     return replace(config, subscriptions=updated)
 
 
-def set_subscription_option(
-    config: Config, name: str, key: str, value: str | int
-) -> Config:
+def set_subscription_option(config: Config, name: str, key: str, value: str | int) -> Config:
     """Return a new Config with one option changed on the named subscription."""
     if config.find(name) is None:
         raise ConfigError(f"no subscription named {name!r}")
