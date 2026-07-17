@@ -1,0 +1,15 @@
+# Save newly discovered source URLs to Shiori instead of sending content to Readwise.
+# Generate the API key under Shiori Settings → API key.
+[auth.shiori]
+token_path = "~/.config/pulpwise/shiori_token"
+
+[[subscriptions]]
+name = "example-feed"
+source = "rss"
+url = "https://example.com/feed.xml"
+
+[subscriptions.options]
+location = "shiori"
+
+# Shiori receives only each item's public HTTP(S) URL. Pulp Wise does not send
+# fetched HTML, titles, summaries, or Reader tags to this destination.

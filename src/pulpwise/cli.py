@@ -47,7 +47,7 @@ from pulpwise.state import connect, get_subscription_state, list_oneshots
 from pulpwise.util.http import build_client
 
 app = typer.Typer(
-    help="Pipe feeds, newsletters, and one-shot URLs into Readwise Reader.",
+    help="Route feeds and newsletters to Readwise Reader or Shiori.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -79,7 +79,7 @@ def _main(
         help="Mirror logs to stderr at DEBUG level (logs always go to file).",
     ),
 ) -> None:
-    """Pipe feeds, newsletters, and one-shot URLs into Readwise Reader."""
+    """Route feeds and newsletters to Readwise Reader or Shiori."""
     from pulpwise.util.logging import setup_logging
 
     setup_logging(verbose=verbose)
