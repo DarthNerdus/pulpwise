@@ -1,16 +1,17 @@
-"""Tests for the Subscriptions view's pure helpers.
-
-The widget itself is exercised in `pulpwise tui`; only the
-notification-message logic gets a unit test because the wording matters
-- 'nothing to fetch' vs '+0 from sub, 78 dedup'd' is the difference
-between 'you understand what happened' and 'you think it's broken'.
-"""
+"""Tests for the Subscriptions view's pure display and message helpers."""
 
 from __future__ import annotations
 
+import pytest
+
 from pulpwise.config import Subscription
 from pulpwise.pipeline import BackfillReport
-from pulpwise.tui.views.subscriptions import _backfill_outcome_message, _sub_row_cells
+from pulpwise.tui.views.subscriptions import (
+    _backfill_outcome_message,
+    _canonical_destination,
+    _destination_label,
+    _sub_row_cells,
+)
 
 
 def _report(
@@ -80,26 +81,64 @@ def test_message_severity_is_warning_when_errors_present() -> None:
     assert sev == "warning"
 
 
+# ---- destination display --------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "canonical", "label"),
+    [
+        (None, "feed", "Feed"),
+        ("feed", "feed", "Feed"),
+        ("new", "new", "Inbox"),
+        ("inbox", "new", "Inbox"),
+        ("later", "later", "Later"),
+        ("archive", None, "Archive (legacy)"),
+        ("", None, "Invalid: ''"),
+        (42, None, "Invalid: 42"),
+    ],
+)
+def test_destination_mapping(raw: str | int | None, canonical: str | None, label: str) -> None:
+    assert _canonical_destination(raw) == canonical
+    assert _destination_label(raw) == label
+
+
+def test_destination_label_escapes_hostile_markup() -> None:
+    assert _destination_label("[red]evil") == r"Invalid: '\[red]evil'"
+
+
 # ---- _sub_row_cells (table row rendering) ----------------------------------------
 
 
 def test_row_cells_disabled_sub_shows_disabled_status_and_dims() -> None:
     sub = Subscription(name="paused", source="rss", url="https://p.example/feed", disabled=True)
     cells = _sub_row_cells(sub, None, {"paused": 7})
-    assert cells[4] == "[dim]disabled[/dim]"  # Status column
+    assert cells[2] == "[dim]Feed[/dim]"  # Destination column
+    assert cells[5] == "[dim]disabled[/dim]"  # Status column
     assert all(cell.startswith("[dim]") for cell in cells)
 
 
 def test_row_cells_enabled_sub_is_not_dimmed() -> None:
-    sub = Subscription(name="live", source="rss", url="https://l.example/feed")
+    sub = Subscription(
+        name="live",
+        source="rss",
+        url="https://l.example/feed",
+        options={"location": "new"},
+    )
     cells = _sub_row_cells(sub, None, {})
-    assert cells[4] == "-"  # no state yet
+    assert cells[2] == "Inbox"
+    assert cells[5] == "-"  # no state yet
     assert not any("[dim]" in cell for cell in cells)
 
 
 def test_row_cells_escape_hostile_markup_in_name_and_url() -> None:
     """DataTable parses cells as markup; a bracket in a name must not crash the table."""
-    sub = Subscription(name="[red]evil", source="rss", url="https://x.example/[b]feed")
+    sub = Subscription(
+        name="[red]evil",
+        source="rss",
+        url="https://x.example/[b]feed",
+        options={"location": "[blue]bad"},
+    )
     cells = _sub_row_cells(sub, None, {})
     assert cells[0] == r"\[red]evil"
-    assert cells[5] == r"https://x.example/\[b]feed"
+    assert cells[2] == r"Invalid: '\[blue]bad'"
+    assert cells[6] == r"https://x.example/\[b]feed"

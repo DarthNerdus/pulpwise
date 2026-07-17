@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tomllib
 from typing import ClassVar
 
 from rich.markup import escape
@@ -10,7 +11,8 @@ from textual.app import ComposeResult
 from textual.binding import BindingType
 from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Input, Label, Static
+from textual.widgets import DataTable, Input, Label, OptionList, Static
+from textual.widgets.option_list import Option
 
 from pulpwise import pipeline
 from pulpwise.config import (
@@ -20,6 +22,7 @@ from pulpwise.config import (
     remove_subscription,
     save_config,
     set_subscription_disabled,
+    set_subscription_option,
 )
 from pulpwise.state import (
     SubscriptionState,
@@ -30,6 +33,94 @@ from pulpwise.state import (
 from pulpwise.tui.views.base import View
 
 _BACKFILL_DEFAULT_POSTS = 50
+_DESTINATION_CHOICES = (("feed", "Feed"), ("new", "Inbox"), ("later", "Later"))
+_DESTINATION_INDEX = {value: index for index, (value, _label) in enumerate(_DESTINATION_CHOICES)}
+_DESTINATION_LABELS = dict(_DESTINATION_CHOICES)
+
+
+def _canonical_destination(raw: str | int | None) -> str | None:
+    """Return the TUI-supported canonical value, or None for legacy/invalid input."""
+    if raw is None:
+        return "feed"
+    if raw == "inbox":
+        return "new"
+    if isinstance(raw, str) and raw in _DESTINATION_LABELS:
+        return raw
+    return None
+
+
+def _destination_label(raw: str | int | None) -> str:
+    """Markup-safe user-facing label for a configured destination."""
+    canonical = _canonical_destination(raw)
+    if canonical is not None:
+        return _DESTINATION_LABELS[canonical]
+    if raw == "archive":
+        return "Archive (legacy)"
+    return f"Invalid: {escape(repr(raw))}"
+
+
+class DestinationPromptScreen(ModalScreen[str | None]):
+    """Choose a destination for later sync/backfill operations."""
+
+    DEFAULT_CSS = """
+    DestinationPromptScreen {
+        align: center middle;
+    }
+    DestinationPromptScreen > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 60;
+        height: auto;
+    }
+    DestinationPromptScreen Label {
+        padding: 0 0 1 0;
+    }
+    DestinationPromptScreen OptionList {
+        height: auto;
+        max-height: 5;
+    }
+    DestinationPromptScreen #destination-hint {
+        color: $text-muted;
+        padding: 1 0 0 0;
+    }
+    """
+
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, sub_name: str, raw_location: str | int | None) -> None:
+        super().__init__()
+        self._sub_name = sub_name
+        self._raw_location = raw_location
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label(escape(f"Destination for {self._sub_name!r}"))
+            yield Label(f"Current: {_destination_label(self._raw_location)}")
+            yield OptionList(
+                *(Option(label, id=value) for value, label in _DESTINATION_CHOICES),
+                id="destination-options",
+            )
+            yield Label(
+                "Applies to sync/backfill jobs started after this save\n"
+                "Enter selects  ·  Esc cancels",
+                id="destination-hint",
+            )
+
+    def on_mount(self) -> None:
+        options = self.query_one("#destination-options", OptionList)
+        options.highlighted = _DESTINATION_INDEX.get(
+            _canonical_destination(self._raw_location) or ""
+        )
+        options.focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        destination = event.option.id
+        if destination in _DESTINATION_LABELS:
+            self.dismiss(destination)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class BackfillPromptScreen(ModalScreen[int | None]):
@@ -127,6 +218,7 @@ class SubscriptionsView(View):
         ("d", "delete_selected", "Delete"),
         ("b", "backfill_selected", "Backfill"),
         ("e", "toggle_disabled_selected", "Enable/Disable"),
+        ("l", "change_destination_selected", "Destination"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -135,7 +227,7 @@ class SubscriptionsView(View):
 
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
-        table.add_columns("Name", "Source", "Items", "Last Sync", "Status", "URL")
+        table.add_columns("Name", "Source", "Destination", "Items", "Last Sync", "Status", "URL")
         self._subs: list[Subscription] = []
         self._states: dict[str, SubscriptionState | None] = {}
         self.refresh_data()
@@ -218,6 +310,79 @@ class SubscriptionsView(View):
         verb = "disabled" if not sub.disabled else "enabled"
         self.notify(f"{verb} {sub.name!r}", severity="information", markup=False)
 
+    def action_change_destination_selected(self) -> None:
+        table = self.query_one(DataTable)
+        row = table.cursor_row
+        if row is None or row >= len(self._subs):
+            return
+        snapshot = self._subs[row]
+
+        def on_destination(destination: str | None) -> None:
+            if destination is not None:
+                self._save_destination(snapshot, destination)
+
+        self.app.push_screen(
+            DestinationPromptScreen(snapshot.name, snapshot.option("location")),
+            on_destination,
+        )
+
+    def _save_destination(self, snapshot: Subscription, destination: str) -> None:
+        try:
+            config = load_config(create_if_missing=False)
+        except (ConfigError, OSError, tomllib.TOMLDecodeError) as exc:
+            self.notify(f"could not load config: {exc}", severity="error", markup=False)
+            return
+
+        current = config.find(snapshot.name)
+        if current is None or (current.source, current.url) != (snapshot.source, snapshot.url):
+            self.notify(
+                f"subscription {snapshot.name!r} changed; reopen Destination",
+                severity="warning",
+                markup=False,
+            )
+            return
+
+        current_raw = current.option("location")
+        if _canonical_destination(current_raw) == destination:
+            self.notify(
+                f"{snapshot.name!r} already routes to {_DESTINATION_LABELS[destination]}",
+                severity="information",
+                markup=False,
+            )
+            return
+        if current_raw != snapshot.option("location"):
+            self.notify(
+                f"destination for {snapshot.name!r} changed; reopen Destination",
+                severity="warning",
+                markup=False,
+            )
+            return
+
+        try:
+            updated = set_subscription_option(config, snapshot.name, "location", destination)
+            save_config(updated)
+        except (ConfigError, OSError) as exc:
+            self.notify(f"could not save destination: {exc}", severity="error", markup=False)
+            return
+
+        self._finish_destination_save(snapshot.name, destination)
+
+    def _finish_destination_save(self, sub_name: str, destination: str) -> None:
+        try:
+            self.refresh_data()
+        except Exception as exc:
+            self.notify(
+                f"destination saved, but display refresh failed: {type(exc).__name__}: {exc}",
+                severity="error",
+                markup=False,
+            )
+            return
+        self.notify(
+            f"{sub_name!r} → {_DESTINATION_LABELS[destination]} for future jobs",
+            severity="information",
+            markup=False,
+        )
+
     def action_backfill_selected(self) -> None:
         """Open a modal asking how many older posts to fetch, then run."""
         table = self.query_one(DataTable)
@@ -278,7 +443,7 @@ class SubscriptionsView(View):
 
 def _sub_row_cells(
     sub: Subscription, state: SubscriptionState | None, counts: dict[str, int]
-) -> tuple[str, str, str, str, str, str]:
+) -> tuple[str, str, str, str, str, str, str]:
     """One DataTable row for a subscription.
 
     Name and URL are user-derived; DataTable parses string cells as markup,
@@ -292,6 +457,7 @@ def _sub_row_cells(
     cells = (
         escape(sub.name),
         sub.source,
+        _destination_label(sub.option("location")),
         str(count),
         last_sync,
         status,
