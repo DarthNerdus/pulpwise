@@ -38,7 +38,7 @@ from pulpwise.sinks.readwise import (
     ReadwiseSink,
     canonical_location,
 )
-from pulpwise.sinks.shiori import ShioriAuthError
+from pulpwise.sinks.shiori import ShioriAuthError, ShioriSink
 from pulpwise.sources import REGISTRY as _SOURCE_REGISTRY
 from pulpwise.sources import pick_source_for_url
 from pulpwise.sources.rss import RSSSource
@@ -112,19 +112,18 @@ def add(
         None,
         "--location",
         "-l",
-        help="Where saves land in Reader: new (alias: inbox), later, archive, "
-        "or feed. Default: feed. On subscribes this persists as options.location.",
+        help="Destination: Shiori, or a Reader location (new/inbox, later, archive, "
+        "or feed). Default: Reader feed. Subscriptions persist this choice.",
     ),
 ) -> None:
     """Add one or more URLs.
 
-    Each URL is auto-classified independently: feeds are subscribed, single
-    articles are pushed to Readwise Reader one-shot. Use `--once` or `--feed`
-    to override detection for every URL in the call. Errors on individual
-    URLs do not abort the batch.
+    Each URL is auto-classified independently: feeds are subscribed and single
+    articles are saved one-shot. Use `--once` or `--feed` to override detection
+    for every URL in the call. Errors on individual URLs do not abort the batch.
 
-    Saves land in Reader's Feed section unless `--location` (here) or the
-    subscription's `options.location` (in config.toml) says otherwise.
+    The default is Readwise Feed. Pass `--location shiori` to save source URLs
+    to Shiori instead; subscriptions persist the same choice in config.toml.
     """
     if once and feed:
         typer.echo("--once and --feed are mutually exclusive.", err=True)
@@ -134,8 +133,9 @@ def add(
         raise typer.Exit(code=2)
     if location is not None:
         location = canonical_location(location)
-        if location not in SAVE_LOCATIONS:
-            valid = ", ".join(sorted(SAVE_LOCATIONS))
+        valid_locations = SAVE_LOCATIONS | {pipeline.SHIORI_DESTINATION}
+        if location not in valid_locations:
+            valid = ", ".join(sorted(valid_locations))
             typer.echo(f"--location must be one of: {valid} (or inbox)", err=True)
             raise typer.Exit(code=2)
     # Persisted on subscribes so every future sync routes the same way.
@@ -169,41 +169,34 @@ def add(
 
 
 class _BatchSink:
-    """One lazily-created ReadwiseSink shared by every one-shot in an `add` batch.
-
-    A batch of N one-shot URLs must share a single sink so the 45/min save
-    pacing and the 429 fail-fast breaker span the whole batch (a fresh sink
-    per URL resets both). Creation is lazy so feed-subscribes never require
-    a Readwise token. A failed creation (missing/rejected token) is
-    remembered: every later one-shot in the batch fails fast with the same
-    hint instead of re-attempting creation per URL, while feed-subscribes
-    in the same batch still proceed.
-    """
+    """Lazily share one sink per destination across an `add` batch."""
 
     def __init__(self, cfg: Config) -> None:
         self._cfg = cfg
-        self._sink: ReadwiseSink | None = None
-        self._auth_error: ReadwiseAuthError | None = None
+        self._sinks: dict[str, ReadwiseSink | ShioriSink] = {}
+        self._auth_errors: dict[str, ReadwiseAuthError | ShioriAuthError] = {}
 
-    def get(self) -> ReadwiseSink:
-        """Return the shared sink, creating it on first use.
-
-        Raises `ReadwiseAuthError` - the remembered one after a failed
-        creation - when no usable token is configured.
-        """
-        if self._auth_error is not None:
-            raise self._auth_error
-        if self._sink is None:
-            try:
-                self._sink = ReadwiseSink.from_config(self._cfg)
-            except ReadwiseAuthError as exc:
-                self._auth_error = exc
-                raise
-        return self._sink
+    def get(self, destination: str) -> ReadwiseSink | ShioriSink:
+        auth_error = self._auth_errors.get(destination)
+        if auth_error is not None:
+            raise auth_error
+        existing = self._sinks.get(destination)
+        if existing is not None:
+            return existing
+        try:
+            if destination == pipeline.SHIORI_DESTINATION:
+                created: ReadwiseSink | ShioriSink = ShioriSink.from_config(self._cfg)
+            else:
+                created = ReadwiseSink.from_config(self._cfg)
+        except (ReadwiseAuthError, ShioriAuthError) as exc:
+            self._auth_errors[destination] = exc
+            raise
+        self._sinks[destination] = created
+        return created
 
     def close(self) -> None:
-        if self._sink is not None:
-            self._sink.close()
+        for sink in self._sinks.values():
+            sink.close()
 
 
 def _auto_dispatch(
@@ -310,14 +303,18 @@ def _alternate_feed_url(html: str, base_url: str) -> str | None:
 
 
 def _add_once(url: str, sink: _BatchSink, location: str | None = None) -> bool:
-    """Push a single URL to Readwise Reader. True on success; False (after logging) on failure."""
+    """Push a single URL to its selected destination."""
+    destination = (
+        pipeline.SHIORI_DESTINATION if location == pipeline.SHIORI_DESTINATION else "readwise"
+    )
     try:
-        result = pipeline.add_once(url, sink=sink.get(), location=location)
-    except ReadwiseAuthError as exc:
-        # Subclass of FetchError; must be caught first. Raised by shared-sink
-        # creation (no token configured) or mid-push (rejected 401 token);
-        # the message carries the setup hint (where to get a token, where to
-        # put it).
+        result = pipeline.add_once(
+            url,
+            sink=sink.get(destination),
+            location=location,
+        )
+    except (ReadwiseAuthError, ShioriAuthError) as exc:
+        # Destination credential failures carry their own setup hint.
         typer.echo(f"{url}: {exc}", err=True)
         return False
     except FetchError as exc:
@@ -336,12 +333,14 @@ def _add_once(url: str, sink: _BatchSink, location: str | None = None) -> bool:
             err=True,
         )
         return False
+    label = "Shiori" if destination == pipeline.SHIORI_DESTINATION else "Readwise"
     if result.deduped:
-        typer.echo(f"already pushed → {result.reader_url}")
+        prefix = "already saved in Shiori" if label == "Shiori" else "already pushed"
+        typer.echo(f"{prefix} → {result.reader_url}")
         return True
-    typer.echo(f"→ Readwise: {result.reader_url}")
+    typer.echo(f"→ {label}: {result.reader_url}")
     if result.already_in_readwise:
-        typer.echo("  (Readwise already had this URL)")
+        typer.echo(f"  ({label} already had this URL)")
     return True
 
 

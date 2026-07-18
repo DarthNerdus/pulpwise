@@ -156,7 +156,7 @@ CREATE TABLE items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   subscription_name TEXT,               -- NULL for one-shots
   source_url TEXT NOT NULL,             -- feed URL, or article URL for one-shots
-  dedup_key TEXT NOT NULL UNIQUE,       -- sha256(normalize_url(article_url))
+  dedup_key TEXT NOT NULL UNIQUE,       -- Readwise hash, or `shiori:<hash>`
   canonical_url TEXT NOT NULL,
   title TEXT,
   pub_date TEXT,
@@ -171,7 +171,7 @@ CREATE TABLE items (
 CREATE INDEX idx_items_subscription ON items(subscription_name);
 ```
 
-- **Liveness** is `deleted_at IS NULL`. Deleting an item tombstones the row only - the Reader document is left alone (push-only contract); sync's skip check (`was_ingested`) matches *any* row, live or tombstoned, so deleted articles are never re-pushed. `pulpwise add <url>` on a tombstoned article re-pushes deliberately via an upsert that clears `deleted_at`.
+- **Liveness** is `deleted_at IS NULL`. Deleting an item tombstones the row only; the remote item is left alone. Dedup keys are namespaced for Shiori so the same URL can intentionally exist once in each destination. Sync skips live and tombstoned rows within its selected destination; an explicit one-shot re-add revives that destination's tombstone.
 - **Legacy pulpline databases migrate in place**: `ALTER TABLE ... ADD COLUMN` statements are tried on connect with `OperationalError` swallowed (SQLite has no `IF NOT EXISTS` for columns), and `deleted_at` is backfilled for rows that were soft-deleted under the old scheme (liveness there was `output_path IS NOT NULL`). Old file-era items keep `submission_kind` NULL (surfaced as `file` in stats) and are never re-pushed - any existing row counts as ingested.
 - Dedup is **global** by `dedup_key = sha256(normalize_url(article_url))`, where `normalize_url` lowercases scheme + host, strips tracking query params (`utm_*`, `fbclid`, `mc_*`, `ref`), drops the fragment, and trims trailing slashes. An article appearing in two subscribed feeds is pushed once; whichever feed delivers it first wins.
 
@@ -189,7 +189,7 @@ CREATE INDEX idx_items_subscription ON items(subscription_name);
 
 ## 3. Command surface (shipped)
 
-- [x] **`pulpwise add <url>...`** - auto-classifies each URL: real feeds subscribe, single articles one-shot. `--once` / `--feed` override for the whole call, `--name` names the subscription. Batch-friendly: errors on one URL don't abort the rest. One-shots print the Reader document URL; re-adding an already-pushed URL is an idempotent no-op that prints the existing one.
+- [x] **`pulpwise add <url>...`** - auto-classifies each URL: real feeds subscribe, single articles save one-shot. `--once` / `--feed` override classification, `--name` names a subscription, and `--location shiori` selects URL-only Shiori delivery instead of the default Readwise Feed. Errors on one URL do not abort the batch; dedup is per destination.
 - [x] **`pulpwise sync`** - sequentially runs all subscriptions, pushes not-yet-seen items to Reader.
 - [x] **`pulpwise list`** - configured subscriptions with last-sync status.
 - [x] **`pulpwise remove <name>`** - removes a subscription from config (documents already in Reader stay).

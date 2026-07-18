@@ -115,6 +115,20 @@ def test_add_with_explicit_name(
     assert config.subscriptions[0].name == "stratechery"
 
 
+def test_add_feed_persists_shiori_destination(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_client_factory: ClientFactory,
+) -> None:
+    feed_url = "https://example.com/feed"
+    _patch_build_client(monkeypatch, mock_client_factory, {feed_url: _feed()})
+
+    result = runner.invoke(app, ["add", feed_url, "--feed", "--location", "shiori"])
+
+    assert result.exit_code == 0, result.output
+    sub = load_config().subscriptions[0]
+    assert sub.option("location") == "shiori"
+
+
 def test_is_front_page_helper() -> None:
     from pulpwise.cli import _is_front_page
 

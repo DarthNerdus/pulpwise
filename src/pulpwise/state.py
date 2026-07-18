@@ -73,6 +73,8 @@ _MIGRATIONS = [
     "ALTER TABLE items ADD COLUMN readwise_url TEXT",
     "ALTER TABLE items ADD COLUMN submission_kind TEXT",
     "ALTER TABLE items ADD COLUMN destination TEXT NOT NULL DEFAULT 'readwise'",
+    "UPDATE items SET dedup_key = 'shiori:' || dedup_key "
+    "WHERE destination = 'shiori' AND dedup_key NOT LIKE 'shiori:%'",
     "UPDATE items SET deleted_at = ingested_at "
     "WHERE output_path IS NULL AND deleted_at IS NULL AND readwise_id IS NULL",
 ]

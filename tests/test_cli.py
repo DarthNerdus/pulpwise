@@ -13,6 +13,7 @@ from pulpwise.cli import app
 from pulpwise.config import Config, Subscription, load_config, save_config
 from pulpwise.models import ExtractionError, FetchError
 from pulpwise.sinks.readwise import ReadwiseAuthError
+from pulpwise.sinks.shiori import ShioriAuthError
 
 runner = CliRunner()
 
@@ -50,6 +51,14 @@ def _patch_sink(monkeypatch: pytest.MonkeyPatch) -> _FakeSink:
     return sink
 
 
+def _patch_shiori_sink(monkeypatch: pytest.MonkeyPatch) -> _FakeSink:
+    sink = _FakeSink()
+    monkeypatch.setattr(
+        cli, "ShioriSink", SimpleNamespace(from_config=lambda cfg, client=None: sink)
+    )
+    return sink
+
+
 def test_help_exits_zero_and_mentions_purpose() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
@@ -62,10 +71,12 @@ def test_version_flag() -> None:
     assert __version__ in result.output
 
 
-def test_add_help_lists_once_flag() -> None:
+def test_add_help_lists_once_flag_and_shiori_destination() -> None:
     result = runner.invoke(app, ["add", "--help"])
     assert result.exit_code == 0
-    assert "--once" in _help_text(result.output)
+    help_text = _help_text(result.output)
+    assert "--once" in help_text
+    assert "Shiori" in help_text
 
 
 def test_tui_help_names_all_views() -> None:
@@ -107,6 +118,46 @@ def test_add_once_passes_location_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert result.exit_code == 0, result.output
     assert captured["location"] == "new"
+
+
+def test_add_once_routes_shiori_destination(monkeypatch: pytest.MonkeyPatch) -> None:
+    shiori_sink = _patch_shiori_sink(monkeypatch)
+    captured: dict[str, object] = {}
+
+    def fake_add_once(url: str, *args: object, **kwargs: object) -> pipeline.AddResult:
+        captured.update(url=url, sink=kwargs.get("sink"), location=kwargs.get("location"))
+        return pipeline.AddResult(reader_url=url, deduped=False)
+
+    monkeypatch.setattr(pipeline, "add_once", fake_add_once)
+
+    result = runner.invoke(
+        app, ["add", "https://example.com/article", "--once", "--location", "shiori"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "url": "https://example.com/article",
+        "sink": shiori_sink,
+        "location": "shiori",
+    }
+    assert "→ Shiori: https://example.com/article" in result.output
+    assert shiori_sink.closed is True
+
+
+def test_add_once_shiori_auth_error_exits_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_from_config(cfg: Config, client: object = None) -> object:
+        del cfg, client
+        raise ShioriAuthError("no Shiori API key configured; set [auth.shiori].token")
+
+    monkeypatch.setattr(cli, "ShioriSink", SimpleNamespace(from_config=fail_from_config))
+
+    result = runner.invoke(
+        app, ["add", "https://example.com/article", "--once", "--location", "shiori"]
+    )
+
+    assert result.exit_code == 1
+    assert "auth.shiori" in result.output
+    assert not isinstance(result.exception, ShioriAuthError)
 
 
 def test_add_once_defaults_location_to_none_meaning_feed(

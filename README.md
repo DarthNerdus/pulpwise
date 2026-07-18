@@ -77,9 +77,11 @@ Inline `token` is also accepted. `PULPWISE_SHIORI_TOKEN` wins over both config f
 # Subscribe to a feed (auto-detected as feed)
 pulpwise add https://simonwillison.net/atom/everything/
 
-# Push a single article into Reader (auto-detected as one-shot;
-# prints the Reader document URL)
+# Push a single article into Reader (auto-detected as one-shot)
 pulpwise add https://stratechery.com/2026/the-end-of-the-beginning/
+
+# Or save that source URL to Shiori
+pulpwise add --once --location shiori https://stratechery.com/2026/the-end-of-the-beginning/
 
 # Batch - any mix of feeds and articles, each classified independently
 pulpwise add https://a.example/feed https://b.example/article https://c.example/post
@@ -97,7 +99,7 @@ pulpwise list
 pulpwise remove simon-willison-s-weblog
 ```
 
-`pw` is the short alias for all of these. `pulpwise add` auto-classifies each URL: real feeds get subscribed, single articles get one-shot pushed. Use `--once` or `--feed` to override for the whole call, `--name` to name the subscription. Errors on one URL do not abort the rest of the batch, and re-adding a URL that's already in Reader is a no-op that prints the existing document URL.
+`pw` is the short alias for all of these. `pulpwise add` auto-classifies each URL: real feeds get subscribed, single articles get one-shot saved. Use `--once` or `--feed` to override for the whole call, `--name` to name a subscription, and `--location shiori` to select Shiori instead of Readwise Feed. Errors on one URL do not abort the rest of the batch, and re-adding a URL already recorded for that destination is a no-op.
 
 ### How a save happens
 
@@ -154,7 +156,7 @@ tags = "tech, essays"    # comma-separated Reader tags; ignored by Shiori
 
 `location` selects either a Readwise location or Shiori. **Unset, it defaults to `feed`** - Pulp Wise acts as a feed reader in front of Reader, so pushed items join the Feed section like native RSS instead of flooding your inbox. Set `location = "new"` for Reader's Inbox, or `location = "shiori"` to save each newly discovered public source URL to Shiori instead. A destination change applies to future sync/backfill work and never moves items already recorded in the local ledger.
 
-One-shot `pulpwise add <url>` remains Readwise-only and takes Reader locations through `--location`. Reader silently falls back to the account default if a targeted location is disabled. `tags` applies only to Readwise saves. The TUI presents **Feed**, **Inbox**, **Later**, and **Shiori**; `archive` remains config/CLI-only for compatibility.
+One-shot `pulpwise add <url>` uses Readwise Feed by default and accepts the same `--location shiori` destination. Reader silently falls back to the account default if a targeted Reader location is disabled. `tags` applies only to Readwise saves. The TUI presents **Feed**, **Inbox**, **Later**, and **Shiori**; `archive` remains config/CLI-only for compatibility.
 
 ## TUI
 

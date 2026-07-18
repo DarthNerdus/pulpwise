@@ -280,6 +280,20 @@ def test_legacy_migration_is_idempotent(tmp_path: Path) -> None:
         assert dead["deleted_at"] == "2025-02-01T10:00:00+00:00"
 
 
+def test_migration_namespaces_existing_shiori_dedup_keys(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    with connect(db) as conn:
+        record_item(conn, _record(dedup="legacy-key", destination="shiori"))
+
+    with connect(db) as conn:
+        row = conn.execute("SELECT dedup_key FROM items").fetchone()
+        assert row["dedup_key"] == "shiori:legacy-key"
+
+    with connect(db) as conn:
+        row = conn.execute("SELECT dedup_key FROM items").fetchone()
+        assert row["dedup_key"] == "shiori:legacy-key"
+
+
 def test_legacy_migration_never_tombstones_pulpwise_rows(tmp_path: Path) -> None:
     """New rows written into a migrated legacy DB have output_path NULL too -
     the backfill UPDATE re-runs on every connect and must not sweep them up

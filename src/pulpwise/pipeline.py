@@ -94,8 +94,16 @@ def _submission_for_destination(source: Source, ref: ItemRef, destination: str) 
     return _build_submission(source, ref)
 
 
+def _ingestion_key(url: str, destination: str) -> str:
+    key = dedup_key(url)
+    return key if destination == "readwise" else f"{destination}:{key}"
+
+
 def _already_ingested_as(
-    conn: sqlite3.Connection, submission: ReaderSubmission, ref_key: str
+    conn: sqlite3.Connection,
+    submission: ReaderSubmission,
+    ref_key: str,
+    destination: str,
 ) -> bool:
     """True when the submission's Reader-identity URL was already ingested
     under a *different* discovery URL.
@@ -106,7 +114,7 @@ def _already_ingested_as(
     mid:, one-shot vs feed forms). Without this second check, a tombstoned
     document could be resurrected - or double-rowed - via the other form.
     """
-    submission_key = dedup_key(submission.url)
+    submission_key = _ingestion_key(submission.url, destination)
     return submission_key != ref_key and was_ingested(conn, submission_key)
 
 
@@ -246,11 +254,12 @@ class ProgressReporter(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class AddResult:
-    """Outcome of a one-shot `add`: where the document lives in Reader."""
+    """Outcome of a one-shot add at its selected destination."""
 
     reader_url: str
-    deduped: bool  # True = the ledger already had it; nothing was pushed
-    already_in_readwise: bool = False  # pushed, but Reader already knew the URL
+    deduped: bool  # True = the destination ledger already had it; nothing was pushed
+    already_in_readwise: bool = False  # legacy name: destination already had the URL
+    destination: str = "readwise"
 
 
 def add_once(
@@ -258,38 +267,25 @@ def add_once(
     client: httpx.Client | None = None,
     state_path: Path | None = None,
     config: Config | None = None,
-    sink: ReadwiseSink | None = None,
+    sink: DestinationSink | None = None,
     *,
     location: str | None = None,
     tags: tuple[str, ...] = (),
 ) -> AddResult:
-    """Push a single URL to Readwise Reader. Dedup-aware.
-
-    The source is picked by URL pattern (`Source.matches_url`); URLSource is
-    the fallback. So `arxiv.org/abs/...` routes to ArXivSource (which submits
-    the PDF URL), everything else routes to URLSource (bare URL save -
-    Readwise extracts server-side).
-
-    `location=None` means `DEFAULT_LOCATION` (Reader's Feed); the CLI's
-    `--location` flag passes an explicit override through here.
-
-    If `url` has already been pushed, returns the existing Reader document
-    URL without re-pushing. Re-runs are idempotent.
-    """
+    """Push a single URL to Readwise Reader or Shiori. Dedup-aware."""
     cfg = config if config is not None else load_config()
-    if location is None:
-        location = DEFAULT_LOCATION
-    key = dedup_key(url)
-
+    destination = SHIORI_DESTINATION if location == SHIORI_DESTINATION else "readwise"
+    sink_location = None if destination == SHIORI_DESTINATION else location or DEFAULT_LOCATION
+    key = _ingestion_key(url, destination)
     source_cls = pick_source_for_url(url)
 
-    _log.info("add_once start url=%s source=%s", url, source_cls.name)
+    _log.info("add_once start url=%s source=%s destination=%s", url, source_cls.name, destination)
 
     with connect(state_path) as conn:
         existing = is_seen(conn, key)
         if existing is not None:
-            _log.info("add_once dedup-hit url=%s reader_url=%s", url, existing)
-            return AddResult(reader_url=existing, deduped=True)
+            _log.info("add_once dedup-hit url=%s destination=%s", url, destination)
+            return AddResult(reader_url=existing, deduped=True, destination=destination)
 
         with source_cls.from_config(cfg, client=client) as source:
             refs = list(source.discover(url))
@@ -297,22 +293,24 @@ def add_once(
                 raise RuntimeError(
                     f"{source_cls.__name__}.discover yielded {len(refs)} items, expected exactly 1"
                 )
-            submission = _build_submission(source, refs[0])
+            submission = _submission_for_destination(source, refs[0], destination)
 
-        # The Reader-identity URL can differ from what the user typed (arXiv
-        # abs vs pdf, tracking params). Dedup on it too, and key the ledger
-        # row on it so future discoveries of either form dedup correctly.
-        submission_key = dedup_key(submission.url)
+        submission_key = _ingestion_key(submission.url, destination)
         if submission_key != key:
             existing = is_seen(conn, submission_key)
             if existing is not None:
-                _log.info("add_once dedup-hit url=%s reader_url=%s", url, existing)
-                return AddResult(reader_url=existing, deduped=True)
+                _log.info("add_once dedup-hit url=%s destination=%s", url, destination)
+                return AddResult(reader_url=existing, deduped=True, destination=destination)
 
         owns_sink = sink is None
-        active_sink = sink if sink is not None else ReadwiseSink.from_config(cfg, client=client)
+        if sink is not None:
+            active_sink = sink
+        elif destination == SHIORI_DESTINATION:
+            active_sink = ShioriSink.from_config(cfg)
+        else:
+            active_sink = ReadwiseSink.from_config(cfg, client=client)
         try:
-            result = active_sink.push(submission, location=location, tags=tags)
+            result = active_sink.push(submission, location=sink_location, tags=tags)
         finally:
             if owns_sink:
                 active_sink.close()
@@ -324,18 +322,20 @@ def add_once(
                 source_url=url,
                 dedup_key=submission_key,
                 canonical_url=submission.url,
-                title=submission.title,
+                title=submission.title or refs[0].title,
                 pub_date=_iso_or_none(submission.pub_date),
                 readwise_id=result.document_id,
                 readwise_url=result.reader_url,
                 submission_kind=result.kind,
+                destination=destination,
             ),
         )
-        _log.info("add_once pushed url=%s reader_url=%s", url, result.reader_url)
+        _log.info("add_once pushed url=%s destination=%s", url, destination)
         return AddResult(
             reader_url=result.reader_url,
             deduped=False,
             already_in_readwise=result.already_existed,
+            destination=destination,
         )
 
 
@@ -446,7 +446,7 @@ def _sync_with_source(
     paywalled_items: list[PaywalledItem] = []
 
     for index, ref in enumerate(refs):
-        key = dedup_key(ref.url)
+        key = _ingestion_key(ref.url, push_options.destination)
         if was_ingested(conn, key):
             # Includes soft-deleted items - don't re-push what the user deleted.
             skipped += 1
@@ -461,8 +461,8 @@ def _sync_with_source(
             progress.item_started(sub.name, ref.title or ref.url)
         try:
             submission = _submission_for_destination(source, ref, push_options.destination)
-            if _already_ingested_as(conn, submission, key):
-                # The Reader-identity URL (arXiv pdf vs abs, email permalink
+            if _already_ingested_as(conn, submission, key, push_options.destination):
+                # The destination identity URL (arXiv pdf vs abs, email permalink
                 # vs mid:) was already ingested under a different discovery
                 # URL - possibly deleted since. Skip; never resurrect.
                 skipped += 1
@@ -674,7 +674,7 @@ def _backfill_with_source(
                     stopped_reason = "since"
                     break
 
-            key = dedup_key(ref.url)
+            key = _ingestion_key(ref.url, push_options.destination)
             if was_ingested(conn, key):
                 skipped += 1
                 _ack_item(source, ref)
@@ -682,7 +682,7 @@ def _backfill_with_source(
 
             try:
                 submission = _submission_for_destination(source, ref, push_options.destination)
-                if _already_ingested_as(conn, submission, key):
+                if _already_ingested_as(conn, submission, key, push_options.destination):
                     skipped += 1
                     _ack_item(source, ref)
                     continue

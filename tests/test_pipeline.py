@@ -9,9 +9,10 @@ import httpx
 from pulpwise import pipeline
 from pulpwise.config import Config
 from pulpwise.sinks.readwise import ReadwiseSink
+from pulpwise.sinks.shiori import ShioriSink
 from pulpwise.state import connect, is_seen
 from pulpwise.util.dedup import dedup_key
-from tests.conftest import FIXTURES, FakeReadwise
+from tests.conftest import FIXTURES, FakeReadwise, FakeShiori
 
 URL = "https://example.com/article"
 
@@ -79,6 +80,46 @@ def test_add_once_defaults_to_feed_location(
     pipeline.add_once(URL, config=Config(), sink=readwise_sink)
 
     assert fake_readwise.save_payloads[0]["location"] == "feed"
+
+
+def test_add_once_shiori_saves_only_original_url_and_records_destination(
+    fake_shiori: FakeShiori,
+    shiori_sink: ShioriSink,
+) -> None:
+    result = pipeline.add_once(
+        URL,
+        config=Config(),
+        sink=shiori_sink,
+        location="shiori",
+    )
+
+    assert result.reader_url == URL
+    assert result.already_in_readwise is False
+    assert fake_shiori.save_payloads == [{"url": URL}]
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT canonical_url, destination, readwise_id, submission_kind FROM items"
+        ).fetchone()
+        assert row["canonical_url"] == URL
+        assert row["destination"] == "shiori"
+        assert row["readwise_id"] == "link-1"
+        assert row["submission_kind"] == "url"
+
+
+def test_add_once_can_save_same_url_to_both_destinations(
+    fake_readwise: FakeReadwise,
+    readwise_sink: ReadwiseSink,
+    fake_shiori: FakeShiori,
+    shiori_sink: ShioriSink,
+) -> None:
+    pipeline.add_once(URL, config=Config(), sink=readwise_sink)
+    pipeline.add_once(URL, config=Config(), sink=shiori_sink, location="shiori")
+
+    assert len(fake_readwise.save_payloads) == 1
+    assert len(fake_shiori.save_payloads) == 1
+    with connect() as conn:
+        rows = conn.execute("SELECT destination FROM items ORDER BY id").fetchall()
+        assert [row["destination"] for row in rows] == ["readwise", "shiori"]
 
 
 def test_add_once_routes_arxiv_urls_to_pdf_submission(
