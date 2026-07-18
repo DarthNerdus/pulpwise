@@ -31,6 +31,7 @@ TOKEN_ENV_VAR = "PULPWISE_SHIORI_TOKEN"
 _RATE_BUCKET = "shiori"
 # Shiori allows 30 link creations/minute. Stay below that during long runs.
 _SAVE_MIN_INTERVAL = 60.0 / 25.0
+_MAX_RETRY_AFTER_WAIT = 120.0
 
 
 class ShioriAuthError(FetchError):
@@ -90,28 +91,24 @@ class ShioriSink:
                 retry_after=remaining,
             )
         self._pace()
-        try:
-            response = self._client.post(
-                SAVE_URL,
-                json={"url": submission.url},
-                headers={"Authorization": f"Bearer {self._token}"},
-            )
-        except httpx.HTTPError as exc:
-            raise FetchError(f"Shiori save failed: {exc}") from exc
+        response = self._post(submission.url)
+        if response.status_code == 429:
+            retry_after = _retry_after_seconds(response)
+            if retry_after > _MAX_RETRY_AFTER_WAIT:
+                raise self._trip(retry_after, f"asked to wait {ceil(retry_after)}s")
+            _log.warning("Shiori 429; waiting %.0fs then retrying once", retry_after)
+            self._sleep(retry_after)
+            response = self._post(submission.url)
+            if response.status_code == 429:
+                raise self._trip(
+                    _retry_after_seconds(response),
+                    "429 persisted after waiting out Retry-After",
+                )
 
         if response.status_code in (401, 403):
             raise ShioriAuthError(
                 "Shiori rejected the API key; generate a fresh key in Shiori Settings"
             )
-        if response.status_code == 429:
-            retry_after = _retry_after_seconds(response)
-            self._blocked_until = self._clock() + retry_after
-            raise RateLimited(
-                f"rate limited by Shiori: retry after {retry_after:.0f}s",
-                host=_RATE_BUCKET,
-                retry_after=retry_after,
-            )
-
         data = _response_json(response)
         if response.status_code != 200 or data.get("success") is not True:
             error = data.get("error")
@@ -137,6 +134,25 @@ class ShioriSink:
             " (already existed)" if result.already_existed else "",
         )
         return result
+
+    def _post(self, url: str) -> httpx.Response:
+        try:
+            return self._client.post(
+                SAVE_URL,
+                json={"url": url},
+                headers={"Authorization": f"Bearer {self._token}"},
+            )
+        except httpx.HTTPError as exc:
+            raise FetchError(f"Shiori save failed: {exc}") from exc
+
+    def _trip(self, retry_after: float, reason: str) -> RateLimited:
+        cooldown = max(retry_after, 60.0)
+        self._blocked_until = self._clock() + cooldown
+        return RateLimited(
+            f"rate limited by Shiori: {reason}",
+            host=_RATE_BUCKET,
+            retry_after=cooldown,
+        )
 
     def _pace(self) -> None:
         now = self._clock()

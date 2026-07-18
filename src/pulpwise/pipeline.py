@@ -94,16 +94,25 @@ def _submission_for_destination(source: Source, ref: ItemRef, destination: str) 
     return _build_submission(source, ref)
 
 
-def _ingestion_key(url: str, destination: str) -> str:
+def _destination_key(url: str, destination: str) -> str:
     key = dedup_key(url)
     return key if destination == "readwise" else f"{destination}:{key}"
+
+
+def _subscription_keys(url: str) -> tuple[str, str]:
+    base = dedup_key(url)
+    return base, f"{SHIORI_DESTINATION}:{base}"
+
+
+def _was_subscription_ingested(conn: sqlite3.Connection, url: str) -> bool:
+    """Subscription history is global even when its future destination changes."""
+    return any(was_ingested(conn, key) for key in _subscription_keys(url))
 
 
 def _already_ingested_as(
     conn: sqlite3.Connection,
     submission: ReaderSubmission,
     ref_key: str,
-    destination: str,
 ) -> bool:
     """True when the submission's Reader-identity URL was already ingested
     under a *different* discovery URL.
@@ -114,8 +123,10 @@ def _already_ingested_as(
     mid:, one-shot vs feed forms). Without this second check, a tombstoned
     document could be resurrected - or double-rowed - via the other form.
     """
-    submission_key = _ingestion_key(submission.url, destination)
-    return submission_key != ref_key and was_ingested(conn, submission_key)
+    submission_keys = _subscription_keys(submission.url)
+    return ref_key not in submission_keys and any(
+        was_ingested(conn, key) for key in submission_keys
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +223,7 @@ class SyncReport:
     errors: int
     error_messages: tuple[str, ...] = ()
     paywalled: tuple[PaywalledItem, ...] = ()
+    rate_limited_host: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,7 +288,7 @@ def add_once(
     cfg = config if config is not None else load_config()
     destination = SHIORI_DESTINATION if location == SHIORI_DESTINATION else "readwise"
     sink_location = None if destination == SHIORI_DESTINATION else location or DEFAULT_LOCATION
-    key = _ingestion_key(url, destination)
+    key = _destination_key(url, destination)
     source_cls = pick_source_for_url(url)
 
     _log.info("add_once start url=%s source=%s destination=%s", url, source_cls.name, destination)
@@ -295,7 +307,7 @@ def add_once(
                 )
             submission = _submission_for_destination(source, refs[0], destination)
 
-        submission_key = _ingestion_key(submission.url, destination)
+        submission_key = _destination_key(submission.url, destination)
         if submission_key != key:
             existing = is_seen(conn, submission_key)
             if existing is not None:
@@ -363,6 +375,7 @@ def sync(
     """
     cfg = config or load_config()
     reports: list[SyncReport] = []
+    blocked_destinations: set[str] = set()
     sinks = _SinkPool(cfg, override=sink)
     try:
         sinks.prepare(cfg.subscriptions)
@@ -371,7 +384,17 @@ def sync(
                 if sub.disabled:
                     _log.info("sync %s skipped (disabled)", sub.name)
                     continue
-                reports.append(_sync_subscription(sub, cfg, conn, client, sinks, progress))
+                try:
+                    destination = _push_options(sub).destination
+                except ConfigError:
+                    destination = None
+                if destination in blocked_destinations:
+                    _log.info("sync %s deferred (%s rate limit)", sub.name, destination)
+                    continue
+                report = _sync_subscription(sub, cfg, conn, client, sinks, progress)
+                reports.append(report)
+                if destination is not None and report.rate_limited_host == destination:
+                    blocked_destinations.add(destination)
     finally:
         sinks.close()
     return SyncTotal(reports=tuple(reports))
@@ -444,10 +467,11 @@ def _sync_with_source(
     errors = 0
     error_msgs: list[str] = []
     paywalled_items: list[PaywalledItem] = []
+    rate_limited_host: str | None = None
 
     for index, ref in enumerate(refs):
-        key = _ingestion_key(ref.url, push_options.destination)
-        if was_ingested(conn, key):
+        key = _destination_key(ref.url, push_options.destination)
+        if _was_subscription_ingested(conn, ref.url):
             # Includes soft-deleted items - don't re-push what the user deleted.
             skipped += 1
             # Ack skips too: this lets a source heal external state that a
@@ -461,7 +485,7 @@ def _sync_with_source(
             progress.item_started(sub.name, ref.title or ref.url)
         try:
             submission = _submission_for_destination(source, ref, push_options.destination)
-            if _already_ingested_as(conn, submission, key, push_options.destination):
+            if _already_ingested_as(conn, submission, key):
                 # The destination identity URL (arXiv pdf vs abs, email permalink
                 # vs mid:) was already ingested under a different discovery
                 # URL - possibly deleted since. Skip; never resurrect.
@@ -513,6 +537,7 @@ def _sync_with_source(
             remaining = len(refs) - index
             _log.warning("sync %s rate-limited url=%s err=%s", sub.name, ref.url, exc)
             errors += 1
+            rate_limited_host = exc.host
             error_msgs.append(f"{exc}; {remaining} item(s) deferred to the next sync run")
             if progress is not None:
                 progress.item_finished(sub.name)
@@ -540,7 +565,13 @@ def _sync_with_source(
         total_items=source.last_known_total,
     )
     return SyncReport(
-        sub.name, new_items, skipped, errors, tuple(error_msgs), tuple(paywalled_items)
+        sub.name,
+        new_items,
+        skipped,
+        errors,
+        tuple(error_msgs),
+        tuple(paywalled_items),
+        rate_limited_host,
     )
 
 
@@ -674,15 +705,15 @@ def _backfill_with_source(
                     stopped_reason = "since"
                     break
 
-            key = _ingestion_key(ref.url, push_options.destination)
-            if was_ingested(conn, key):
+            key = _destination_key(ref.url, push_options.destination)
+            if _was_subscription_ingested(conn, ref.url):
                 skipped += 1
                 _ack_item(source, ref)
                 continue
 
             try:
                 submission = _submission_for_destination(source, ref, push_options.destination)
-                if _already_ingested_as(conn, submission, key, push_options.destination):
+                if _already_ingested_as(conn, submission, key):
                     skipped += 1
                     _ack_item(source, ref)
                     continue

@@ -154,7 +154,7 @@ location = "new"         # new | later | archive | feed (default) | shiori
 tags = "tech, essays"    # comma-separated Reader tags; ignored by Shiori
 ```
 
-`location` selects either a Readwise location or Shiori. **Unset, it defaults to `feed`** - Pulp Wise acts as a feed reader in front of Reader, so pushed items join the Feed section like native RSS instead of flooding your inbox. Set `location = "new"` for Reader's Inbox, or `location = "shiori"` to save each newly discovered public source URL to Shiori instead. A destination change applies to future sync/backfill work and never moves items already recorded in the local ledger.
+`location` selects either a Readwise location or Shiori. **Unset, it defaults to `feed`** - Pulp Wise acts as a feed reader in front of Reader, so pushed items join the Feed section like native RSS instead of flooding your inbox. Set `location = "new"` for Reader's Inbox, or `location = "shiori"` to save each newly discovered public source URL to Shiori instead. A destination change applies only to genuinely unseen items in future sync/backfill work: existing subscription history remains satisfied and is never replayed or moved.
 
 One-shot `pulpwise add <url>` uses Readwise Feed by default and accepts the same `--location shiori` destination. Reader silently falls back to the account default if a targeted Reader location is disabled. `tags` applies only to Readwise saves. The TUI presents **Feed**, **Inbox**, **Later**, and **Shiori**; `archive` remains config/CLI-only for compatibility.
 

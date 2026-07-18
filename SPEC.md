@@ -103,7 +103,7 @@ The default sink. `POST https://readwise.io/api/v3/save/` with `Authorization: T
 - The request body is exactly `{ "url": ref.url }`, using the discovered source URL. Pulp Wise does not fetch the article body for a Shiori route; HTML, title, author, summary, and Reader tags are never forwarded, including for authenticated/gated sources.
 - Only public HTTP(S) URLs are accepted. Synthetic `pulpwise.invalid` identities, non-web source IDs, credential-bearing URLs, localhost names, and non-global IP literals fail at item level rather than creating an unusable or unsafe Shiori entry.
 - A 200 JSON response with `success: true` and `linkId` is success; `duplicate: true` means Shiori already had the URL and bumped it.
-- Link creation is limited to 30/minute. The sink paces at 25/minute and converts 429 + `Retry-After` into the pipeline's normal rate-limited deferral, blocking later Shiori pushes during that cooldown.
+- Link creation is limited to 30/minute. The sink paces at 25/minute, waits out one bounded `Retry-After`, and retries once. A persistent 429 stops Shiori work for the rest of that sync run instead of producing one cooldown error per remaining subscription.
 - Shiori does not document a stable per-link application URL, so the ledger opens the public source URL for Shiori-routed items.
 - Only providers used by enabled subscriptions are initialized for a run. A Shiori-only config does not require a Readwise token; mixed runs reuse one sink instance per provider.
 
@@ -171,7 +171,7 @@ CREATE TABLE items (
 CREATE INDEX idx_items_subscription ON items(subscription_name);
 ```
 
-- **Liveness** is `deleted_at IS NULL`. Deleting an item tombstones the row only; the remote item is left alone. Dedup keys are namespaced for Shiori so the same URL can intentionally exist once in each destination. Sync skips live and tombstoned rows within its selected destination; an explicit one-shot re-add revives that destination's tombstone.
+- **Liveness** is `deleted_at IS NULL`. Deleting an item tombstones the row only; the remote item is left alone. Subscription history is global across destinations: changing a subscription from Readwise to Shiori affects only genuinely unseen items and never replays its existing ledger. Explicit one-shot adds use a Shiori-prefixed key so a user can intentionally save the same URL once to each service; a one-shot re-add revives that destination's tombstone.
 - **Legacy pulpline databases migrate in place**: `ALTER TABLE ... ADD COLUMN` statements are tried on connect with `OperationalError` swallowed (SQLite has no `IF NOT EXISTS` for columns), and `deleted_at` is backfilled for rows that were soft-deleted under the old scheme (liveness there was `output_path IS NOT NULL`). Old file-era items keep `submission_kind` NULL (surfaced as `file` in stats) and are never re-pushed - any existing row counts as ingested.
 - Dedup is **global** by `dedup_key = sha256(normalize_url(article_url))`, where `normalize_url` lowercases scheme + host, strips tracking query params (`utm_*`, `fbclid`, `mc_*`, `ref`), drops the fragment, and trims trailing slashes. An article appearing in two subscribed feeds is pushed once; whichever feed delivers it first wins.
 

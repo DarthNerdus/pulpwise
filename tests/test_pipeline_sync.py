@@ -162,6 +162,53 @@ def test_sync_dedups_on_second_run(
     assert len(fake_readwise.save_payloads) == 2  # nothing was re-pushed
 
 
+def test_switching_subscription_to_shiori_does_not_replay_readwise_history(
+    mock_client_factory: ClientFactory,
+    fake_readwise: FakeReadwise,
+    readwise_sink: ReadwiseSink,
+    fake_shiori: FakeShiori,
+    shiori_sink: ShioriSink,
+) -> None:
+    client = mock_client_factory({FEED_URL: _feed()})
+    pipeline.sync(config=_rss_config(), client=client, sink=readwise_sink)
+
+    switched = pipeline.sync(
+        config=_rss_config(options={"location": "shiori"}),
+        client=client,
+        sink=shiori_sink,
+    )
+
+    assert switched.total_new == 0
+    assert switched.total_skipped == 2
+    assert fake_shiori.save_payloads == []
+
+
+def test_subscription_sync_recognizes_existing_prefixed_shiori_history(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_shiori: FakeShiori,
+    shiori_sink: ShioriSink,
+) -> None:
+    monkeypatch.setitem(REGISTRY, "fake-static", StaticSource)
+    first_url = "https://pub.example.com/post-0"
+    pipeline.add_once(first_url, config=Config(), sink=shiori_sink, location="shiori")
+    config = Config(
+        subscriptions=(
+            Subscription(
+                name="pub",
+                source="fake-static",
+                url="https://pub.example.com",
+                options={"location": "shiori"},
+            ),
+        )
+    )
+
+    total = pipeline.sync(config=config, sink=shiori_sink)
+
+    assert total.total_new == 2
+    assert total.total_skipped == 1
+    assert [payload["url"] for payload in fake_shiori.save_payloads].count(first_url) == 1
+
+
 def test_sync_skips_disabled_subscriptions(
     mock_client_factory: ClientFactory,
     fake_readwise: FakeReadwise,
@@ -449,13 +496,12 @@ def test_sync_rate_limited_sink_aborts_subscription_with_deferral(
         assert is_seen(conn, dedup_key("https://pub.example.com/post-0")) is None
 
 
-def test_sync_readwise_breaker_fails_later_subscriptions_fast(
+def test_sync_stops_same_destination_after_persistent_rate_limit(
     monkeypatch: pytest.MonkeyPatch,
     fake_readwise: FakeReadwise,
     readwise_sink: ReadwiseSink,
 ) -> None:
-    """After Readwise trips, remaining subscriptions error instantly - no
-    stacked Retry-After waits, no further POSTs."""
+    """After a destination trips, later subscriptions are deferred without discovery."""
     monkeypatch.setitem(REGISTRY, "fake-static", StaticSource)
     fake_readwise.save_responses.append(httpx.Response(429, headers={"Retry-After": "999"}))
     config = Config(
@@ -467,11 +513,46 @@ def test_sync_readwise_breaker_fails_later_subscriptions_fast(
 
     total = pipeline.sync(config=config, sink=readwise_sink)
 
-    by_name = {r.name: r for r in total.reports}
-    assert by_name["first"].errors == 1
-    assert by_name["second"].errors == 1
-    assert "cooling down" in by_name["second"].error_messages[0]
-    assert len(fake_readwise.save_payloads) == 1  # the tripping POST was the only one
+    assert [report.name for report in total.reports] == ["first"]
+    assert total.reports[0].errors == 1
+    assert total.reports[0].rate_limited_host == "readwise"
+    assert len(fake_readwise.save_payloads) == 1  # no attempt from the second subscription
+
+
+def test_shiori_persistent_rate_limit_defers_remaining_shiori_subscriptions(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_shiori: FakeShiori,
+    shiori_sink: ShioriSink,
+) -> None:
+    monkeypatch.setitem(REGISTRY, "fake-static", StaticSource)
+    fake_shiori.save_responses.extend(
+        [
+            httpx.Response(429, headers={"Retry-After": "1"}),
+            httpx.Response(429, headers={"Retry-After": "1"}),
+        ]
+    )
+    config = Config(
+        subscriptions=(
+            Subscription(
+                name="first",
+                source="fake-static",
+                url="https://a.example.com",
+                options={"location": "shiori"},
+            ),
+            Subscription(
+                name="second",
+                source="fake-static",
+                url="https://b.example.com",
+                options={"location": "shiori"},
+            ),
+        )
+    )
+
+    total = pipeline.sync(config=config, sink=shiori_sink)
+
+    assert [report.name for report in total.reports] == ["first"]
+    assert total.reports[0].rate_limited_host == "shiori"
+    assert len(fake_shiori.save_payloads) == 2  # initial request + one waited retry
 
 
 def test_sync_buckets_paywalled_items_without_erroring(
@@ -635,6 +716,40 @@ def test_backfill_skips_already_ingested_but_keeps_walking(
     assert report.skipped_already_ingested == 3
     assert report.new_items == 1  # the 2025 hole got filled
     assert report.stopped_reason == "exhausted"
+
+
+def test_switching_backfill_to_shiori_does_not_replay_readwise_history(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_shiori: FakeShiori,
+    readwise_sink: ReadwiseSink,
+    shiori_sink: ShioriSink,
+) -> None:
+    monkeypatch.setitem(REGISTRY, "fake-back", BackSource)
+    monkeypatch.setattr(BackSource, "refs", _back_refs(3))
+    readwise_sub = _back_sub()
+    pipeline.backfill(
+        readwise_sub,
+        config=Config(subscriptions=(readwise_sub,)),
+        sink=readwise_sink,
+        max_new=None,
+    )
+    shiori_sub = Subscription(
+        name=readwise_sub.name,
+        source=readwise_sub.source,
+        url=readwise_sub.url,
+        options={"location": "shiori"},
+    )
+
+    report = pipeline.backfill(
+        shiori_sub,
+        config=Config(subscriptions=(shiori_sub,)),
+        sink=shiori_sink,
+        max_new=None,
+    )
+
+    assert report.new_items == 0
+    assert report.skipped_already_ingested == 3
+    assert fake_shiori.save_payloads == []
 
 
 def test_backfill_stops_on_readwise_rate_limit(

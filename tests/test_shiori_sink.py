@@ -112,7 +112,7 @@ def test_second_push_is_paced(
     assert fake_timer.sleeps == [pytest.approx(_SAVE_MIN_INTERVAL)]
 
 
-def test_429_raises_rate_limited_and_blocks_later_pushes(
+def test_429_waits_for_retry_after_and_retries_once(
     fake_shiori: FakeShiori,
     fake_timer: FakeTimer,
     shiori_sink: ShioriSink,
@@ -125,19 +125,40 @@ def test_429_raises_rate_limited_and_blocks_later_pushes(
         )
     )
 
-    with pytest.raises(RateLimited) as excinfo:
+    result = shiori_sink.push(SUBMISSION)
+
+    assert result.document_id == "link-1"
+    assert fake_timer.sleeps == [12.0]
+    assert len(fake_shiori.save_payloads) == 2
+
+
+def test_persistent_429_blocks_later_pushes(
+    fake_shiori: FakeShiori,
+    fake_timer: FakeTimer,
+    shiori_sink: ShioriSink,
+) -> None:
+    def rate_limit() -> httpx.Response:
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "12"},
+            json={"success": False, "error": "Too many requests"},
+        )
+
+    fake_shiori.save_responses.extend([rate_limit(), rate_limit()])
+
+    with pytest.raises(RateLimited, match="persisted") as excinfo:
         shiori_sink.push(SUBMISSION)
 
     assert excinfo.value.host == "shiori"
-    assert excinfo.value.retry_after == 12.0
+    assert excinfo.value.retry_after == 60.0
+    assert fake_timer.sleeps == [12.0]
     posts_so_far = len(fake_shiori.save_payloads)
-    sleeps_so_far = list(fake_timer.sleeps)
 
     with pytest.raises(RateLimited, match="cooling down"):
         shiori_sink.push(ReaderSubmission(url="https://example.com/later"))
 
     assert len(fake_shiori.save_payloads) == posts_so_far
-    assert fake_timer.sleeps == sleeps_so_far
+    assert fake_timer.sleeps == [12.0]
 
 
 def test_empty_token_is_rejected() -> None:
